@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: relatorio-audiencia-rpa
+    env: python
+    buildCommand: bash build.sh
+    startCommand: gunicorn app:app --timeout 600 --workers 1 --threads 4 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: APP_USER
+        sync: false
+      - key: APP_PASS
+        sync: false
+      - key: ELAW_VISEU_USER
+        sync: false
+      - key: ELAW_VISEU_PASS
+        sync: false
+      - key: ELAW_CARREFOUR_USER
+        sync: false
+      - key: ELAW_CARREFOUR_PASS
+        sync: false
+      - key: ELAW_VISEU_URL
+        value: https://viseuadv.elawio.com.br
+      - key: ELAW_CARREFOUR_URL
+        value: https://carrefour.elaw.com.br
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/project/src/.playwright-browsers

@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Relatório Audiência RPA — Elaw</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f0f2f5;
+      color: #1a1a1a;
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 40px 16px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 16px rgba(0,0,0,.10);
+      width: 100%;
+      max-width: 760px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      background: #1F4E79;
+      color: #fff;
+      padding: 24px 32px;
+    }
+    .card-header h1 { font-size: 1.25rem; font-weight: 600; }
+    .card-header p  { font-size: .85rem; opacity: .8; margin-top: 4px; }
+
+    .card-body { padding: 32px; display: flex; flex-direction: column; gap: 24px; }
+
+    /* Info banner */
+    .info-banner {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-size: .82rem;
+      color: #1e40af;
+      line-height: 1.5;
+    }
+    .info-banner strong { display: block; margin-bottom: 3px; font-size: .85rem; }
+
+    /* Upload zone */
+    .upload-zone {
+      border: 2px dashed #b0c4de;
+      border-radius: 8px;
+      padding: 36px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+    }
+    .upload-zone:hover, .upload-zone.drag { border-color: #1F4E79; background: #f0f6ff; }
+    .upload-zone svg { width: 40px; height: 40px; color: #1F4E79; margin-bottom: 10px; }
+    .upload-zone p   { font-size: .9rem; color: #555; }
+    .upload-zone strong { display: block; font-size: 1rem; color: #1F4E79; margin-bottom: 4px; }
+    #file-input { display: none; }
+
+    /* Preview */
+    #preview { display: none; }
+    .preview-info {
+      background: #e8f4e8;
+      border: 1px solid #a8d5a2;
+      border-radius: 8px;
+      padding: 14px 18px;
+      font-size: .875rem;
+      color: #2d6a2d;
+    }
+    .preview-info strong { display: block; margin-bottom: 6px; }
+    .preview-list { list-style: none; padding: 0; margin-top: 6px; }
+    .preview-list li { padding: 2px 0; color: #444; font-size: .82rem; }
+    .preview-list li::before { content: "→ "; color: #2d6a2d; }
+
+    /* Buttons */
+    .btn-row { display: flex; gap: 12px; }
+    button {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 6px;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s, background .15s;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+
+    #btn-execute {
+      background: #1F4E79;
+      color: #fff;
+      flex: 1;
+    }
+    #btn-execute:not(:disabled):hover { background: #163a5c; }
+
+    #btn-reset {
+      background: #e5e7eb;
+      color: #374151;
+    }
+    #btn-reset:hover { background: #d1d5db; }
+
+    /* Log area */
+    #log-section { display: none; }
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .log-header span { font-weight: 600; font-size: .9rem; }
+    .progress-text   { font-size: .8rem; color: #666; }
+
+    #log-box {
+      background: #0d1117;
+      color: #c9d1d9;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+      font-size: .8rem;
+      line-height: 1.6;
+      height: 320px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    #log-box .ok    { color: #56d364; }
+    #log-box .error { color: #f85149; }
+    #log-box .warn  { color: #e3b341; }
+    #log-box .info  { color: #79c0ff; }
+    #log-box .done  { color: #56d364; font-weight: bold; }
+
+    /* Controls during run */
+    #run-controls { display: none; gap: 8px; }
+    #btn-pause {
+      background: #b45309;
+      color: #fff;
+      flex: 1;
+      padding: 10px;
+    }
+    #btn-pause:hover { background: #92400e; }
+    #btn-pause.paused { background: #1F4E79; }
+    #btn-pause.paused:hover { background: #163a5c; }
+    #btn-partial {
+      background: #374151;
+      color: #fff;
+      flex: 1;
+      padding: 10px;
+    }
+    #btn-partial:hover { background: #1f2937; }
+
+    /* Download */
+    #download-section { display: none; }
+    #btn-download {
+      background: #2d6a2d;
+      color: #fff;
+      width: 100%;
+      padding: 12px;
+    }
+    #btn-download:hover { background: #1f4d1f; }
+
+    /* Progress bar */
+    .progress-bar-wrap {
+      background: #e5e7eb;
+      border-radius: 4px;
+      height: 6px;
+      margin-top: 8px;
+      overflow: hidden;
+      display: none;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: #1F4E79;
+      width: 0%;
+      transition: width .4s ease;
+    }
+
+    /* Logout link */
+    .logout-link {
+      text-align: right;
+      font-size: .78rem;
+      color: rgba(255,255,255,.6);
+      margin-top: 2px;
+    }
+    .logout-link a { color: rgba(255,255,255,.8); text-decoration: none; }
+    .logout-link a:hover { color: #fff; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="card-header">
+    <h1>Relatório Audiência RPA</h1>
+    <p>Cumprimento automático da tarefa "Externo: Inserir Relatório de Audiência" — Elaw Carrefour</p>
+    <div class="logout-link"><a href="/logout">Sair</a></div>
+  </div>
+
+  <div class="card-body">
+
+    <!-- Info -->
+    <div class="info-banner">
+      <strong>Como funciona</strong>
+      Para cada processo, o app lê os dados preenchidos pelo correspondente no <b>Elaw Viseu</b>
+      e preenche automaticamente o relatório no <b>Elaw Carrefour</b>.
+      Processos com Observação/Intercorrência são sinalizados no relatório final para revisão manual.
+    </div>
+
+    <!-- Step 1: Upload -->
+    <div>
+      <div class="upload-zone" id="upload-zone">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+        </svg>
+        <strong>Clique ou arraste a planilha aqui</strong>
+        <p>Colunas obrigatórias: <code>Número do Processo</code> · <code>Data da Audiência</code></p>
+      </div>
+      <input type="file" id="file-input" accept=".xlsx" />
+    </div>
+
+    <!-- Preview -->
+    <div id="preview">
+      <div class="preview-info">
+        <strong id="preview-title"></strong>
+        <ul class="preview-list" id="preview-list"></ul>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="btn-row">
+      <button id="btn-execute" disabled>Executar</button>
+      <button id="btn-reset" type="button">Limpar</button>
+    </div>
+
+    <!-- Log -->
+    <div id="log-section">
+      <div class="log-header">
+        <span>Log de execução</span>
+        <span class="progress-text" id="progress-text"></span>
+      </div>
+      <div class="progress-bar-wrap" id="progress-wrap">
+        <div class="progress-bar-fill" id="progress-fill"></div>
+      </div>
+      <div id="log-box"></div>
+    </div>
+
+    <!-- Controls during run -->
+    <div id="run-controls" style="display:none; gap:8px;" class="btn-row">
+      <button id="btn-pause" type="button">⏸ Pausar</button>
+      <button id="btn-partial" type="button">📥 Baixar Parcial</button>
+    </div>
+
+    <!-- Download -->
+    <div id="download-section">
+      <button id="btn-download" type="button">⬇ Baixar Relatório Final</button>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const uploadZone    = document.getElementById("upload-zone");
+  const fileInput     = document.getElementById("file-input");
+  const preview       = document.getElementById("preview");
+  const previewTitle  = document.getElementById("preview-title");
+  const previewList   = document.getElementById("preview-list");
+  const btnExecute    = document.getElementById("btn-execute");
+  const btnReset      = document.getElementById("btn-reset");
+  const logSection    = document.getElementById("log-section");
+  const logBox        = document.getElementById("log-box");
+  const progressText  = document.getElementById("progress-text");
+  const progressWrap  = document.getElementById("progress-wrap");
+  const progressFill  = document.getElementById("progress-fill");
+  const downloadSection = document.getElementById("download-section");
+  const btnDownload   = document.getElementById("btn-download");
+  const runControls   = document.getElementById("run-controls");
+  const btnPause      = document.getElementById("btn-pause");
+  const btnPartial    = document.getElementById("btn-partial");
+
+  let total = 0, done = 0, evtSource = null, isPaused = false;
+
+  // ── Upload ────────────────────────────────────────────────────────────────
+  uploadZone.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+  });
+
+  uploadZone.addEventListener("dragover",  e => { e.preventDefault(); uploadZone.classList.add("drag"); });
+  uploadZone.addEventListener("dragleave", () => uploadZone.classList.remove("drag"));
+  uploadZone.addEventListener("drop", e => {
+    e.preventDefault();
+    uploadZone.classList.remove("drag");
+    if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+  });
+
+  async function uploadFile(file) {
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res  = await fetch("/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) { alert("Erro: " + (data.erro || data.error)); return; }
+
+      total = data.total;
+      previewTitle.textContent = `${data.total} processo(s) carregado(s) — ${file.name}`;
+      previewList.innerHTML = data.preview
+        .map(r => `<li>${r.processo}${r.data ? " — " + r.data : ""}</li>`)
+        .join("") + (data.total > 5 ? `<li>... e mais ${data.total - 5}</li>` : "");
+
+      preview.style.display  = "block";
+      btnExecute.disabled    = false;
+    } catch (e) {
+      alert("Falha ao enviar arquivo: " + e.message);
+    }
+  }
+
+  // ── Execute ───────────────────────────────────────────────────────────────
+  btnExecute.addEventListener("click", async () => {
+    btnExecute.disabled       = true;
+    btnReset.disabled         = true;
+    logSection.style.display  = "block";
+    progressWrap.style.display = "block";
+    downloadSection.style.display = "none";
+    logBox.innerHTML = "";
+    done = 0;
+    updateProgress();
+
+    try {
+      const res  = await fetch("/execute", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        appendLog("Erro: " + (data.erro || data.error), "error");
+        btnExecute.disabled = false;
+        btnReset.disabled   = false;
+        return;
+      }
+      runControls.style.display = "flex";
+      isPaused = false;
+      btnPause.textContent = "⏸ Pausar";
+      btnPause.classList.remove("paused");
+      startSSE();
+    } catch (e) {
+      appendLog("Falha ao iniciar: " + e.message, "error");
+      btnExecute.disabled = false;
+      btnReset.disabled   = false;
+    }
+  });
+
+  function startSSE() {
+    if (evtSource) evtSource.close();
+    evtSource = new EventSource("/logs");
+    evtSource.onmessage = e => {
+      const data = JSON.parse(e.data);
+      if (data.heartbeat) return;
+      if (data.done) {
+        evtSource.close();
+        btnReset.disabled = false;
+        runControls.style.display = "none";
+        downloadSection.style.display = "block";
+        return;
+      }
+      if (data.msg) {
+        appendLog(data.msg, data.status);
+        if (data.status === "ok" || data.status === "error") {
+          done++;
+          updateProgress();
+        }
+      }
+    };
+    evtSource.onerror = () => {
+      appendLog("Conexão SSE perdida.", "warn");
+      evtSource.close();
+    };
+  }
+
+  function appendLog(msg, cls) {
+    const span = document.createElement("span");
+    if (cls) span.className = cls;
+    span.textContent = msg + "\n";
+    logBox.appendChild(span);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function updateProgress() {
+    if (!total) return;
+    const pct = Math.round((done / total) * 100);
+    progressFill.style.width = pct + "%";
+    progressText.textContent = total ? `${done} / ${total}` : "";
+  }
+
+  // ── Pause / Resume ────────────────────────────────────────────────────────
+  btnPause.addEventListener("click", async () => {
+    isPaused = !isPaused;
+    await fetch(isPaused ? "/pause" : "/resume", { method: "POST" });
+    btnPause.textContent = isPaused ? "▶️ Retomar" : "⏸ Pausar";
+    btnPause.classList.toggle("paused", isPaused);
+  });
+
+  // ── Relatório parcial ─────────────────────────────────────────────────────
+  btnPartial.addEventListener("click", () => window.open("/partial-report", "_blank"));
+
+  // ── Reset ─────────────────────────────────────────────────────────────────
+  btnReset.addEventListener("click", () => {
+    if (evtSource) evtSource.close();
+    fileInput.value = "";
+    preview.style.display         = "none";
+    logSection.style.display      = "none";
+    runControls.style.display     = "none";
+    downloadSection.style.display = "none";
+    progressFill.style.width      = "0%";
+    logBox.innerHTML = "";
+    btnExecute.disabled = true;
+    done = 0; total = 0; isPaused = false;
+  });
+
+  // ── Download final ────────────────────────────────────────────────────────
+  btnDownload.addEventListener("click", () => window.location.href = "/download");
+</script>
+</body>
+</html>
