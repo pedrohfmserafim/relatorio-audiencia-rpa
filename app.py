@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import threading
 import traceback
 import unicodedata
@@ -14,23 +15,65 @@ from openpyxl import load_workbook
 
 import rpa as rpa_module
 
-# ── Mapeamento de colunas ─────────────────────────────────────────────────────
-_COL_MAP = {
-    "numero do processo":   "numero_processo",
-    "número do processo":   "numero_processo",
-    "data da audiencia":    "data_audiencia",
-    "data da audiência":    "data_audiencia",
-    "data audiencia":       "data_audiencia",
-    "data audiência":       "data_audiencia",
-    # snake_case aliases
-    "numero_processo":      "numero_processo",
-    "data_audiencia":       "data_audiencia",
-}
+# ── Normalização ──────────────────────────────────────────────────────────────
 
 def _norm(s: str) -> str:
+    """Lowercase + remove acentos + remove ?, *, \t, (, ) e espaços duplos."""
     s = str(s).strip().lower()
     s = unicodedata.normalize("NFD", s)
-    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    s = re.sub(r'[\t\*\?\(\)]', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+# ── Mapeamento de colunas ─────────────────────────────────────────────────────
+
+# Chave: header normalizado (sem acento, sem ?, *, tab)
+# Valor: nome interno usado em row dict / rpa.py
+_COL_MAP = {
+    # Identificação
+    "numero do processo":                                           "numero_processo",
+    "id processo":                                                  "id_processo",
+    "npc":                                                          "npc",
+    "nome do reclamante":                                           "nome_reclamante",
+    # Audiência
+    "data da audiencia":                                            "data_audiencia",
+    "horario da audiencia":                                         "horario_audiencia",
+    # Preposto / advogado
+    "nome preposto":                                                "nome_preposto",
+    "nome do advogado que o acompanhou":                            "nome_advogado",
+    "o advogado chegou no horario da audiencia":                    "advogado_pontual",
+    "o advogado entrou em contato para orientacoes antes da audiencia": "advogado_contato",
+    # Perguntas do preposto
+    "voce foi ouvido":                                              "preposto_ouvido",
+    "as orientacoes recebidas foram claras e suficientes":          "orientacoes_claras",
+    # Intercorrências (header longo — usa prefixo)
+    "houve alguma intercorrencias durante a audiencia":             "intercorrencias",
+    # Testemunhas — Reclamada
+    "teve testemunha":                                              "teve_testemunha",
+    "reclamada levou testemunha":                                   "reclamada_testemunha",
+    "se sim testemunha foi ouvida":                                 "reclamada_testemunha_ouvida",
+    "nome da testemunha reclamada":                                 "reclamada_testemunha_nome",
+    # Testemunhas — Reclamante
+    "reclamante levou testemunha":                                  "reclamante_testemunha",
+    "se sim testemunha foi ouvida reclamante":                      "reclamante_testemunha_ouvida",
+    "nome da testemunha reclamante":                                "reclamante_testemunha_nome",
+    # Resultado
+    "externo - resultado da audiencia":                             "resultado_audiencia",
+    "externo resultado da audiencia":                               "resultado_audiencia",
+}
+
+def _map_header(raw: str) -> str | None:
+    """Mapeia header da planilha para chave interna."""
+    norm = _norm(raw or "")
+    if norm in _COL_MAP:
+        return _COL_MAP[norm]
+    # Prefixo (para headers longos como o de intercorrências)
+    for key, val in _COL_MAP.items():
+        if norm.startswith(key):
+            return val
+    return None
 
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -112,7 +155,12 @@ def upload():
 
     session["upload_session"] = session_id
     preview = [
-        {"processo": r["numero_processo"], "data": str(r.get("data_audiencia") or "")}
+        {
+            "processo": r["numero_processo"],
+            "data":     str(r.get("data_audiencia") or ""),
+            "horario":  str(r.get("horario_audiencia") or ""),
+            "resultado": str(r.get("resultado_audiencia") or ""),
+        }
         for r in rows[:5]
     ]
     return jsonify({"ok": True, "total": len(rows), "preview": preview})
@@ -237,6 +285,7 @@ def internal_error(e):
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
+
 def _parse_spreadsheet(path: Path) -> list[dict]:
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
@@ -245,14 +294,14 @@ def _parse_spreadsheet(path: Path) -> list[dict]:
     if raw_headers is None:
         raise ValueError("Planilha vazia")
 
-    mapped_headers = [_COL_MAP.get(_norm(h or "")) for h in raw_headers]
+    mapped_headers = [_map_header(h) for h in raw_headers]
 
     present  = {k for k in mapped_headers if k}
     required = {"numero_processo", "data_audiencia"}
     missing  = required - present
     if missing:
         raise ValueError(
-            f"Coluna(s) ausente(s): {', '.join(sorted(missing))}. "
+            f"Coluna(s) obrigatória(s) não encontrada(s): {', '.join(sorted(missing))}. "
             "Esperado: 'Número do Processo' e 'Data da Audiência'."
         )
 
@@ -260,7 +309,7 @@ def _parse_spreadsheet(path: Path) -> list[dict]:
     vazias  = 0
     for row in rows_iter:
         data = {k: v for k, v in zip(mapped_headers, row) if k}
-        if not any(data.values()):
+        if not any(v for v in data.values() if v is not None and str(v).strip()):
             vazias += 1
             if vazias >= 3:
                 break
@@ -268,17 +317,30 @@ def _parse_spreadsheet(path: Path) -> list[dict]:
         vazias = 0
         if not data.get("numero_processo"):
             continue
-        # Normaliza data para string DD/MM/YYYY
+
+        # Normaliza data → DD/MM/YYYY
         raw_date = data.get("data_audiencia")
         if hasattr(raw_date, "strftime"):
             data["data_audiencia"] = raw_date.strftime("%d/%m/%Y")
         else:
             data["data_audiencia"] = str(raw_date or "").strip()
+
+        # Normaliza horário → HH:MM
+        raw_time = data.get("horario_audiencia")
+        if hasattr(raw_time, "strftime"):
+            data["horario_audiencia"] = raw_time.strftime("%H:%M")
+        elif hasattr(raw_time, 'seconds'):  # timedelta
+            h, m = divmod(raw_time.seconds // 60, 60)
+            data["horario_audiencia"] = f"{h:02d}:{m:02d}"
+        else:
+            t = str(raw_time or "").strip()
+            data["horario_audiencia"] = t[:5] if t else ""
+
         records.append(data)
 
     wb.close()
     if not records:
-        raise ValueError("Nenhum dado válido encontrado na planilha")
+        raise ValueError("Nenhuma linha válida encontrada na planilha")
     return records
 
 

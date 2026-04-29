@@ -1,9 +1,13 @@
 """
-Elaw — Cumprimento de Tarefa: Externo Inserir Relatório de Audiência
+Elaw Carrefour — Cumprimento em lote: Externo Inserir Relatório de Audiência
 
 Fluxo por processo:
-  1. Elaw VISEU   → ler dados preenchidos pelo correspondente parceiro
-  2. Elaw Carrefour → preencher o formulário "Externo: Inserir Relatório da Audiência"
+  1. Recebe a linha da planilha (já preenchida pelo correspondente/preposto)
+  2. Navega até o processo no Elaw Carrefour
+  3. Localiza o prazo "Externo: Inserir Relatório da Audiência" pela data/hora
+  4. Verifica via lupa que é o prazo correto
+  5. Preenche todos os campos do formulário
+  6. Clica em Confirmar
 
 Notas técnicas (JSF/PrimeFaces):
 - Navegação direta por URL não funciona — usar busca global
@@ -24,13 +28,11 @@ if os.environ.get("RENDER"):
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-ELAW_VISEU_URL      = os.environ.get("ELAW_VISEU_URL",      "https://viseuadv.elawio.com.br")
-ELAW_CARREFOUR_URL  = os.environ.get("ELAW_CARREFOUR_URL",  "https://carrefour.elaw.com.br")
-
-LOGIN_TIMEOUT  = 120_000
-PAGE_TIMEOUT   = 40_000
-POLL_ATTEMPTS  = 12
-POLL_WAIT      = 2.0
+ELAW_URL      = os.environ.get("ELAW_CARREFOUR_URL", "https://carrefour.elaw.com.br")
+LOGIN_TIMEOUT = 120_000
+PAGE_TIMEOUT  = 40_000
+POLL_ATTEMPTS = 12
+POLL_WAIT     = 2.0
 
 IS_SERVER = bool(os.environ.get("RENDER") or os.environ.get("IS_SERVER"))
 
@@ -43,24 +45,35 @@ def run_automation(rows: list[dict], log, report_path: Path, state: dict | None 
     with sync_playwright() as p:
         if IS_SERVER:
             browser = _launch_server(p)
-            ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+            ctx  = browser.new_context(viewport={"width": 1280, "height": 900})
+            page = ctx.new_page()
         else:
             chrome_profile = str(Path(__file__).parent / "chrome_profile")
-            ctx = p.chromium.launch_persistent_context(
+            ctx  = p.chromium.launch_persistent_context(
                 chrome_profile,
                 headless=False,
                 viewport={"width": 1280, "height": 900},
                 slow_mo=120,
             )
-
-        page_viseu     = ctx.new_page()
-        page_carrefour = ctx.new_page()
-
-        log("Abrindo Elaw Viseu...")
-        _setup_page(page_viseu, ELAW_VISEU_URL, "VISEU", log)
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         log("Abrindo Elaw Carrefour...")
-        _setup_page(page_carrefour, ELAW_CARREFOUR_URL, "CARREFOUR", log)
+        page.goto(ELAW_URL, wait_until="networkidle", timeout=30_000)
+
+        if _is_login_page(page):
+            if IS_SERVER:
+                log("Fazendo login automático...", "info")
+                _auto_login(page, log)
+            else:
+                log("⚠️ Sessão expirada — faça login no browser aberto.", "warn")
+                page.wait_for_url(f"**{ELAW_URL}/**", timeout=LOGIN_TIMEOUT)
+                page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+                log("✅ Login detectado, iniciando automação...")
+        else:
+            log("✅ Sessão ativa, iniciando automação...")
+
+        page.goto(f"{ELAW_URL}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
+        page.wait_for_selector('[id*="globaSearchAutocomplete_input"]', state="visible", timeout=PAGE_TIMEOUT)
 
         total = len(rows)
         for i, row in enumerate(rows, 1):
@@ -72,34 +85,38 @@ def run_automation(rows: list[dict], log, report_path: Path, state: dict | None 
 
             numero         = str(row.get("numero_processo", "")).strip()
             data_audiencia = str(row.get("data_audiencia", "")).strip()
+            horario        = str(row.get("horario_audiencia", "")).strip()
+            intercorrencias = str(row.get("intercorrencias") or "").strip()
 
-            log(f"[{i}/{total}] {numero} — {data_audiencia}...")
+            log(f"[{i}/{total}] {numero} — {data_audiencia} {horario}...")
 
             for attempt in range(2):
                 try:
-                    status, detail, observacao = _process_row(
-                        page_viseu, page_carrefour, numero, data_audiencia, log
-                    )
+                    status, detail = _process_row(page, numero, data_audiencia, horario, row, log)
                     break
                 except Exception as e:
                     err_str = str(e)
                     if "Execution context was destroyed" in err_str and attempt == 0:
                         log("  🔁 Contexto destruído, tentando novamente...", "warn")
-                        _recover_page(page_viseu,     ELAW_VISEU_URL,     log)
-                        _recover_page(page_carrefour, ELAW_CARREFOUR_URL, log)
+                        _recover_page(page, log)
                     else:
-                        status, detail, observacao = "ERRO", err_str[:300], ""
-                        _recover_page(page_viseu,     ELAW_VISEU_URL,     log)
-                        _recover_page(page_carrefour, ELAW_CARREFOUR_URL, log)
+                        status, detail = "ERRO", err_str[:300]
+                        _recover_page(page, log)
                         break
+
+            # Sinaliza intercorrência como OBSERVAÇÃO
+            if status == "OK" and intercorrencias and intercorrencias.upper() != "NÃO":
+                status = "OBSERVAÇÃO"
+                detail = "Relatório inserido — intercorrência para revisão manual"
 
             row_result = {
                 "numero_processo": numero,
                 "data_audiencia":  data_audiencia,
+                "resultado":       str(row.get("resultado_audiencia") or ""),
+                "intercorrencias": intercorrencias,
                 "status":          status,
                 "detalhe":         detail,
-                "observacao":      observacao,
-                "horario":         datetime.now().strftime("%H:%M:%S"),
+                "horario_exec":    datetime.now().strftime("%H:%M:%S"),
             }
             results.append(row_result)
             if state is not None:
@@ -107,9 +124,9 @@ def run_automation(rows: list[dict], log, report_path: Path, state: dict | None 
 
             icons = {"OK": "✅", "JÁ CUMPRIDO": "ℹ️", "ERRO": "❌", "OBSERVAÇÃO": "⚠️"}
             css   = {"OK": "ok", "JÁ CUMPRIDO": "ok", "ERRO": "error", "OBSERVAÇÃO": "warn"}
-            log(f"  {icons.get(status, '❌')} {status}: {detail}", css.get(status, "error"))
-            if observacao:
-                log(f"  ⚠️  Observação/Intercorrência detectada — verificação manual necessária", "warn")
+            log(f"  {icons.get(status,'❌')} {status}: {detail}", css.get(status, "error"))
+            if status == "OBSERVAÇÃO":
+                log(f"  ⚠️  Intercorrência: {intercorrencias[:150]}", "warn")
 
         if IS_SERVER:
             browser.close()
@@ -117,11 +134,11 @@ def run_automation(rows: list[dict], log, report_path: Path, state: dict | None 
             ctx.close()
 
     _build_report(results, report_path)
-    ok = sum(1 for r in results if r["status"] in ("OK", "JÁ CUMPRIDO", "OBSERVAÇÃO"))
+    ok  = sum(1 for r in results if r["status"] in ("OK", "JÁ CUMPRIDO", "OBSERVAÇÃO"))
     obs = sum(1 for r in results if r["status"] == "OBSERVAÇÃO")
     log(
         f"Concluído: {ok}/{len(results)} processos com sucesso"
-        + (f" — {obs} com observação para revisão manual" if obs else "") + ".",
+        + (f" — {obs} com intercorrência para revisão" if obs else "") + ".",
         "done",
     )
 
@@ -141,46 +158,19 @@ def _launch_server(p):
     )
 
 
-def _setup_page(page, base_url: str, system: str, log):
-    """Abre o sistema, faz login se necessário e aguarda a tela principal."""
-    page.goto(base_url, wait_until="networkidle", timeout=30_000)
-
-    if _is_login_page(page):
-        if IS_SERVER:
-            log(f"Fazendo login automático no {system}...", "info")
-            _auto_login(page, system, log)
-        else:
-            log(f"⚠️ Sessão {system} expirada — faça login no browser aberto.", "warn")
-            page.wait_for_url(f"**{base_url}/**", timeout=LOGIN_TIMEOUT)
-            page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
-            log(f"✅ Login {system} detectado.")
-    else:
-        log(f"✅ Sessão {system} ativa.")
-
-    page.goto(f"{base_url}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
-    page.wait_for_selector('[id*="globaSearchAutocomplete_input"]', state="visible", timeout=PAGE_TIMEOUT)
-
-
-def _auto_login(page, system: str, log):
-    if system == "VISEU":
-        user = os.environ.get("ELAW_VISEU_USER", "")
-        pwd  = os.environ.get("ELAW_VISEU_PASS", "")
-        env_vars = "ELAW_VISEU_USER e ELAW_VISEU_PASS"
-    else:
-        user = os.environ.get("ELAW_CARREFOUR_USER", "")
-        pwd  = os.environ.get("ELAW_CARREFOUR_PASS", "")
-        env_vars = "ELAW_CARREFOUR_USER e ELAW_CARREFOUR_PASS"
+def _auto_login(page, log):
+    user = os.environ.get("ELAW_CARREFOUR_USER", "")
+    pwd  = os.environ.get("ELAW_CARREFOUR_PASS", "")
 
     if not user or not pwd:
         raise Exception(
-            f"Variáveis {env_vars} não configuradas. "
-            "Adicione-as nas variáveis de ambiente."
+            "Variáveis ELAW_CARREFOUR_USER e ELAW_CARREFOUR_PASS não configuradas."
         )
 
     page.wait_for_selector("#username", state="visible", timeout=PAGE_TIMEOUT)
     page.wait_for_selector("#authKey",  state="visible", timeout=PAGE_TIMEOUT)
 
-    log(f"Preenchendo credenciais {system}...")
+    log("Preenchendo credenciais...")
     page.fill("#username", user, timeout=PAGE_TIMEOUT)
     page.fill("#authKey",  pwd,  timeout=PAGE_TIMEOUT)
 
@@ -198,10 +188,13 @@ def _auto_login(page, system: str, log):
     page.wait_for_load_state("networkidle", timeout=30_000)
 
     if _is_login_page(page):
-        raise Exception(
-            f"Login {system} falhou — verifique {env_vars}."
-        )
-    log(f"✅ Login {system} concluído.")
+        try:
+            page.screenshot(path="/tmp/debug_login.png", full_page=True)
+        except Exception:
+            pass
+        raise Exception("Login falhou — verifique ELAW_CARREFOUR_USER e ELAW_CARREFOUR_PASS.")
+
+    log("✅ Login concluído.")
 
 
 def _is_login_page(page) -> bool:
@@ -220,9 +213,9 @@ def _is_login_page(page) -> bool:
         return False
 
 
-def _recover_page(page, base_url: str, log):
+def _recover_page(page, log):
     try:
-        page.goto(f"{base_url}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
+        page.goto(f"{ELAW_URL}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
         page.wait_for_selector(
             '[id*="globaSearchAutocomplete_input"]',
             state="visible",
@@ -234,592 +227,23 @@ def _recover_page(page, base_url: str, log):
 
 # ── Fluxo por processo ────────────────────────────────────────────────────────
 
-def _process_row(page_viseu, page_carrefour, numero, data_audiencia, log):
-    log("  📖 Lendo dados no Elaw Viseu...")
-    viseu_data = _read_viseu_data(page_viseu, numero, data_audiencia)
-
-    log("  ✏️ Preenchendo no Elaw Carrefour...")
-    status = _write_carrefour_data(page_carrefour, numero, data_audiencia, viseu_data, log)
-
-    observacao = viseu_data.get("observacao") or ""
-    observacao = observacao.strip()
-
-    if status == "JÁ CUMPRIDO":
-        return "JÁ CUMPRIDO", "Tarefa já estava cumprida anteriormente", observacao
-
-    if observacao:
-        return "OBSERVAÇÃO", "Relatório inserido — verificar observação/intercorrência", observacao
-
-    return "OK", "Relatório inserido com sucesso", observacao
-
-
-# ── Elaw VISEU — Leitura ──────────────────────────────────────────────────────
-
-def _read_viseu_data(page, numero: str, data_audiencia: str) -> dict:
-    _navigate_to_process(page, numero, ELAW_VISEU_URL)
-    _click_prazos(page)
-    _click_enviar_relatorio_viseu(page, data_audiencia)
-    return _extract_viseu_form(page)
-
-
-def _click_prazos(page):
-    """Clica na aba/botão 'Prazos' da página do processo no Elaw Viseu."""
-    result = page.evaluate("""(() => {
-        // Tenta por texto exato em vários tipos de elemento
-        const candidates = Array.from(
-            document.querySelectorAll('a, button, li > a, [role="tab"], .ui-menuitem-link')
-        );
-        const el = candidates.find(e =>
-            e.textContent.trim().toLowerCase() === 'prazos'
-        );
-        if (el) { el.click(); return 'ok'; }
-
-        // Fallback: qualquer elemento cujo texto contém apenas "prazos"
-        const fallback = Array.from(document.querySelectorAll('*')).find(e =>
-            e.children.length === 0 &&
-            e.textContent.trim().toLowerCase() === 'prazos'
-        );
-        if (fallback) { fallback.click(); return 'ok'; }
-        return 'nao_encontrado';
-    })()""")
-    if result != "ok":
-        raise Exception("Botão/aba 'Prazos' não encontrado na página do processo Viseu")
-    time.sleep(1.5)
-    page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
-
-
-def _click_enviar_relatorio_viseu(page, data_audiencia: str):
-    """Abre o prazo 'Enviar relatório da audiência' preenchido pelo parceiro."""
-    # Normaliza para comparação: pega só DD/MM/YYYY
-    date_part = data_audiencia.strip()[:10]
-
-    result = page.evaluate(f"""(() => {{
-        const dateHint = '{date_part}';
-        const rows = Array.from(document.querySelectorAll('tr, li, .prazo-row, [class*="prazo"]'));
-
-        // Filtra linhas que mencionam "enviar relat" (ignore case)
-        const candidates = rows.filter(r =>
-            r.textContent.toLowerCase().includes('enviar relat')
-        );
-
-        if (candidates.length === 0) return 'nao_encontrado';
-
-        // Se há mais de um, tenta casar pela data da audiência
-        let target = candidates[0];
-        if (candidates.length > 1 && dateHint) {{
-            const byDate = candidates.find(r => r.textContent.includes(dateHint));
-            if (byDate) target = byDate;
-        }}
-
-        // Tenta clicar num botão de "ver/abrir" dentro da linha;
-        // se não houver, clica na própria linha
-        const btn = target.querySelector(
-            'button[id*="btn"], a[id*="btn"], [title*="Ver"], [title*="Detalhe"], [class*="lupa"]'
-        ) || target.querySelector('a, button');
-
-        if (btn) {{ btn.click(); return 'ok_btn'; }}
-        target.click();
-        return 'ok_row';
-    }})()""")
-
-    if result == "nao_encontrado":
-        raise Exception(
-            "Prazo 'Enviar relatório da audiência' não encontrado no Elaw Viseu. "
-            "Verifique se o correspondente já preencheu."
-        )
-    time.sleep(1.5)
-    page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
-
-
-def _extract_viseu_form(page) -> dict:
-    """Extrai os campos do formulário preenchido pelo correspondente no Viseu."""
-    return page.evaluate("""(() => {
-        // Auxiliar: lê valor de um campo (input/select/textarea/div readonly)
-        function readField(el) {
-            if (!el) return null;
-            if (el.tagName === 'SELECT') {
-                const opt = el.options[el.selectedIndex];
-                return opt ? opt.text.trim() : el.value.trim();
-            }
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-                return el.value.trim();
-            }
-            // PrimeFaces: o valor visível fica num span .ui-selectonemenu-label ou similar
-            const label = el.querySelector('.ui-selectonemenu-label, .ui-chkbox-label, [class*="label"]');
-            if (label) return label.textContent.trim();
-            return el.textContent.trim();
-        }
-
-        // Tenta encontrar valor pelo texto parcial do label/th
-        function findByLabel(keywords) {
-            const allLabels = Array.from(
-                document.querySelectorAll('label, th, td.label, .ui-outputlabel, [class*="label"]')
-            );
-            for (const lbl of allLabels) {
-                const txt = lbl.textContent.trim().toLowerCase();
-                if (keywords.every(k => txt.includes(k))) {
-                    // Tenta campo associado via 'for'
-                    const forId = lbl.getAttribute('for');
-                    if (forId) {
-                        const field = document.getElementById(forId);
-                        if (field) return readField(field);
-                    }
-                    // Tenta elemento seguinte na mesma linha de tabela
-                    const tr = lbl.closest('tr');
-                    if (tr) {
-                        const cells = Array.from(tr.querySelectorAll('td'));
-                        const lblCell = cells.indexOf(lbl.closest('td'));
-                        if (lblCell >= 0 && cells[lblCell + 1]) {
-                            const inp = cells[lblCell + 1].querySelector(
-                                'input:not([type=hidden]), select, textarea, .ui-selectonemenu, div[id]'
-                            );
-                            if (inp) return readField(inp);
-                        }
-                    }
-                    // Tenta container pai
-                    const container = lbl.closest('.ui-grid-col, .field, .form-group, fieldset');
-                    if (container) {
-                        const inp = container.querySelector(
-                            'input:not([type=hidden]), select, textarea, .ui-selectonemenu'
-                        );
-                        if (inp && inp !== lbl) return readField(inp);
-                    }
-                }
-            }
-            return null;
-        }
-
-        // Lê checkboxes Sim/Não pelo texto do label
-        function findSimNao(keywords) {
-            const val = findByLabel(keywords);
-            if (val) return val;
-
-            // Fallback: procura radio/checkbox marcado próximo ao label
-            const allInputs = Array.from(document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked'));
-            for (const inp of allInputs) {
-                const lbl = document.querySelector(`label[for="${inp.id}"]`);
-                if (!lbl) continue;
-                const row = inp.closest('tr, .field, .form-group');
-                if (!row) continue;
-                const rowTxt = row.textContent.toLowerCase();
-                if (keywords.every(k => rowTxt.includes(k))) {
-                    return lbl.textContent.trim() || inp.value;
-                }
-            }
-            return null;
-        }
-
-        const dados_representante = findByLabel(['dados', 'representante'])
-                                 || findByLabel(['representante']);
-        const teve_testemunha     = findSimNao(['testemunha'])
-                                 || findByLabel(['testemunha']);
-        const resultado_audiencia = findByLabel(['resultado', 'audi'])
-                                 || findByLabel(['resultado']);
-        const observacao          = findByLabel(['observa'])
-                                 || findByLabel(['intercorr']);
-
-        // Campos de testemunha (nome, RG, etc.) — captura todos os campos
-        // que aparecem após "Testemunha" quando teve_testemunha === 'Sim'
-        let testemunha_nome = null;
-        let testemunha_documento = null;
-        if (teve_testemunha && teve_testemunha.toLowerCase().includes('sim')) {
-            testemunha_nome      = findByLabel(['nome', 'testemunha'])
-                                || findByLabel(['testemunha', 'nome']);
-            testemunha_documento = findByLabel(['rg', 'testemunha'])
-                                || findByLabel(['documento', 'testemunha'])
-                                || findByLabel(['cpf', 'testemunha']);
-        }
-
-        return {
-            dados_representante,
-            teve_testemunha,
-            testemunha_nome,
-            testemunha_documento,
-            resultado_audiencia,
-            observacao,
-        };
-    })()""")
-
-
-# ── Elaw Carrefour — Escrita ──────────────────────────────────────────────────
-
-def _write_carrefour_data(page, numero: str, data_audiencia: str, viseu_data: dict, log) -> str:
-    _navigate_to_process(page, numero, ELAW_CARREFOUR_URL)
+def _process_row(page, numero, data_audiencia, horario, row, log):
+    _navigate_to_process(page, numero)
     _click_pauta_andamento(page)
 
-    task_status = _find_verify_and_open_task(page, data_audiencia, log)
+    task_status = _find_verify_and_open_task(page, data_audiencia, horario, log)
     if task_status == "ja_cumprido":
-        return "JÁ CUMPRIDO"
+        return "JÁ CUMPRIDO", "Tarefa já estava cumprida anteriormente"
 
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
-    _fill_carrefour_form(page, viseu_data)
+    _fill_form(page, row)
     _confirm_task(page)
-    return "OK"
+    return "OK", "Relatório inserido com sucesso"
 
 
-def _click_pauta_andamento(page):
-    """Clica na aba 'Pauta e Andamento' do processo no Carrefour."""
-    result = page.evaluate("""(() => {
-        const candidates = Array.from(
-            document.querySelectorAll('a, button, li > a, [role="tab"], .ui-menuitem-link')
-        );
-        const el = candidates.find(e => {
-            const t = e.textContent.trim().toLowerCase();
-            return t.includes('pauta') && t.includes('andamento');
-        });
-        if (el) { el.click(); return 'ok'; }
-        return 'nao_encontrado';
-    })()""")
-    if result != "ok":
-        raise Exception("Aba 'Pauta e Andamento' não encontrada na página do processo Carrefour")
-    time.sleep(1.5)
-    page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+# ── Navegação ─────────────────────────────────────────────────────────────────
 
-
-def _find_verify_and_open_task(page, data_audiencia: str, log) -> str:
-    """
-    Localiza o prazo 'Externo: Inserir Relatório da Audiência' correspondente
-    à audiência em questão. Clica na lupa para verificar a data e depois
-    no ícone check para abrir o formulário de cumprimento.
-
-    Retorna 'ok' ou 'ja_cumprido'.
-    """
-    date_part = data_audiencia.strip()[:10]  # DD/MM/YYYY
-
-    # Conta quantos prazos deste tipo existem na tela
-    task_count = page.evaluate("""(() => {
-        const rows = Array.from(document.querySelectorAll('tr'));
-        return rows.filter(r =>
-            r.textContent.toLowerCase().includes('externo') &&
-            r.textContent.toLowerCase().includes('relat') &&
-            r.textContent.toLowerCase().includes('audi')
-        ).length;
-    })()""")
-
-    if task_count == 0:
-        return "ja_cumprido"
-
-    matched_index = None
-
-    if task_count == 1:
-        # Apenas um prazo — verifica a data por precaução mas usa o único existente
-        ok = _verify_task_date(page, 0, date_part, log)
-        if ok or not date_part:
-            matched_index = 0
-        else:
-            raise Exception(
-                f"O único prazo 'Externo: Inserir Relatório' encontrado não corresponde "
-                f"à data {data_audiencia}. Verifique a planilha."
-            )
-    else:
-        # Múltiplos prazos — itera para casar pela data
-        for i in range(task_count):
-            if _verify_task_date(page, i, date_part, log):
-                matched_index = i
-                break
-        if matched_index is None:
-            raise Exception(
-                f"Nenhum dos {task_count} prazos 'Externo: Inserir Relatório' "
-                f"corresponde à data {data_audiencia}."
-            )
-
-    _click_check_icon(page, matched_index)
-    return "ok"
-
-
-def _verify_task_date(page, row_index: int, date_part: str, log) -> bool:
-    """
-    Clica na lupa da linha row_index, lê a data/hora do popup,
-    fecha o popup e retorna True se a data bater.
-    """
-    # Clica na lupa
-    lupa_result = page.evaluate(f"""(() => {{
-        const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
-            r.textContent.toLowerCase().includes('externo') &&
-            r.textContent.toLowerCase().includes('relat') &&
-            r.textContent.toLowerCase().includes('audi')
-        );
-        const row = rows[{row_index}];
-        if (!row) return 'sem_row';
-
-        // Procura botão de lupa/busca/detalhe na linha
-        const buttons = Array.from(row.querySelectorAll('button, a'));
-        // Primeiro tenta pelo ícone de lupa (PrimeFaces usa class "ui-icon-search" ou "fa-search")
-        let btn = buttons.find(b =>
-            b.innerHTML.toLowerCase().includes('search') ||
-            b.innerHTML.toLowerCase().includes('lupa') ||
-            b.innerHTML.toLowerCase().includes('zoom') ||
-            b.innerHTML.toLowerCase().includes('eye') ||
-            (b.querySelector && b.querySelector('[class*="search"], [class*="lupa"]'))
-        );
-        // Fallback: último botão que não seja o check
-        if (!btn) {{
-            btn = buttons.find(b => !b.innerHTML.toLowerCase().includes('check') &&
-                                    !b.innerHTML.toLowerCase().includes('tick'));
-        }}
-        if (!btn && buttons.length > 0) btn = buttons[0];
-        if (!btn) return 'sem_lupa';
-        btn.click();
-        return 'ok';
-    }})()""")
-
-    if lupa_result != "ok":
-        log(f"  ⚠️ Lupa não encontrada na linha {row_index}: {lupa_result}", "warn")
-        return True  # Na dúvida, assume que é o correto se for o único
-
-    time.sleep(1.2)
-
-    # Lê a data do popup/dialog
-    popup_text = page.evaluate("""(() => {
-        const selectors = [
-            '.ui-dialog',
-            '.ui-overlaypanel',
-            '.ui-tooltip-text',
-            '[class*="popup"]',
-            '[class*="modal"]',
-            '[class*="overlay"]',
-        ];
-        for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (el && el.offsetParent !== null) return el.textContent;
-        }
-        // Fallback: conteúdo do body para debug
-        return null;
-    })()""")
-
-    # Fecha o popup
-    page.evaluate("""(() => {
-        const closeSelectors = [
-            '.ui-dialog-titlebar-close',
-            'button[aria-label="Close"]',
-        ];
-        for (const sel of closeSelectors) {
-            const btn = document.querySelector(sel);
-            if (btn) { btn.click(); return; }
-        }
-        // Tenta botão "Fechar" por texto
-        const btns = Array.from(document.querySelectorAll('button, a'));
-        const fechar = btns.find(b => b.textContent.trim().toLowerCase() === 'fechar');
-        if (fechar) fechar.click();
-    })()""")
-    time.sleep(0.5)
-
-    if popup_text and date_part:
-        return date_part in popup_text
-
-    return True  # Sem popup ou sem data para comparar — assume correto
-
-
-def _click_check_icon(page, row_index: int):
-    """Clica no ícone de check (confirmar/cumprir) da linha especificada."""
-    result = page.evaluate(f"""(() => {{
-        const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
-            r.textContent.toLowerCase().includes('externo') &&
-            r.textContent.toLowerCase().includes('relat') &&
-            r.textContent.toLowerCase().includes('audi')
-        );
-        const row = rows[{row_index}];
-        if (!row) return 'sem_row';
-
-        const buttons = Array.from(row.querySelectorAll('button, a'));
-        // Procura pelo check/tick/confirm
-        let btn = buttons.find(b =>
-            b.innerHTML.toLowerCase().includes('check') ||
-            b.innerHTML.toLowerCase().includes('tick') ||
-            b.innerHTML.toLowerCase().includes('confirm') ||
-            b.id.toLowerCase().includes('confirm') ||
-            b.id.toLowerCase().includes('cumprir') ||
-            (b.querySelector && b.querySelector('[class*="check"], [class*="confirm"]'))
-        );
-        // Fallback: o último botão da linha (geralmente o de ação principal)
-        if (!btn && buttons.length > 0) btn = buttons[buttons.length - 1];
-        if (!btn) return 'sem_check';
-        btn.click();
-        return btn.id || 'clicado';
-    }})()""")
-
-    if result in ("sem_row", "sem_check"):
-        raise Exception(f"Botão de check/confirmar não encontrado na linha {row_index}: {result}")
-
-    try:
-        page.wait_for_url("**agendamentoContenciosoConfirm.elaw**", timeout=PAGE_TIMEOUT)
-    except PWTimeout:
-        # Algumas versões do Elaw carregam inline sem mudar URL
-        try:
-            page.wait_for_selector(
-                '[id*="confirmar"], [id*="btnConfirm"], [id*="form"], .ui-dialog',
-                state="visible",
-                timeout=PAGE_TIMEOUT,
-            )
-        except PWTimeout:
-            raise Exception(
-                f"Formulário de cumprimento não carregou após clicar no check "
-                f"(URL atual: {page.url})"
-            )
-
-
-# ── Preenchimento do formulário Carrefour ─────────────────────────────────────
-
-def _fill_carrefour_form(page, viseu_data: dict):
-    """Preenche os campos do formulário 'Externo: Inserir Relatório da Audiência'."""
-
-    # 1. Preposto designado compareceu → Sim (se há dados do representante no Viseu)
-    preposto_compareceu = "Sim" if viseu_data.get("dados_representante") else "Não"
-    _select_radio_or_dropdown(page, ["preposto", "compareceu"], preposto_compareceu)
-    time.sleep(0.5)
-
-    # 2. Teve Testemunha?
-    teve_testemunha = viseu_data.get("teve_testemunha") or "Não"
-    _select_radio_or_dropdown(page, ["testemunha"], teve_testemunha)
-    time.sleep(0.5)
-
-    # 3. Dados da testemunha (se houve)
-    if "sim" in str(teve_testemunha).lower():
-        if viseu_data.get("testemunha_nome"):
-            _fill_text_field(page, ["nome", "testemunha"], viseu_data["testemunha_nome"])
-        if viseu_data.get("testemunha_documento"):
-            _fill_text_field(page, ["rg", "testemunha"], viseu_data["testemunha_documento"])
-        time.sleep(0.5)
-
-    # 4. Externo – Resultado da Audiência
-    resultado = viseu_data.get("resultado_audiencia") or ""
-    if resultado:
-        _select_radio_or_dropdown(page, ["resultado", "audi"], resultado)
-        time.sleep(0.5)
-
-
-def _select_radio_or_dropdown(page, label_keywords: list[str], value: str):
-    """
-    Seleciona um valor em radio, checkbox ou dropdown PrimeFaces.
-    label_keywords: lista de palavras que identificam o campo pelo texto do label.
-    value: valor a selecionar (ex: 'Sim', 'Não', 'Conciliado').
-    """
-    keywords_js  = str(label_keywords)
-    value_lower  = value.strip().lower()
-
-    page.evaluate(f"""(() => {{
-        const keywords = {keywords_js};
-        const valueLower = '{value_lower}';
-
-        // Encontra o campo pelo label
-        function findContainer(keywords) {{
-            const allLabels = Array.from(
-                document.querySelectorAll('label, th, .ui-outputlabel, [class*="label"]')
-            );
-            for (const lbl of allLabels) {{
-                const txt = lbl.textContent.trim().toLowerCase();
-                if (keywords.every(k => txt.includes(k))) {{
-                    const row = lbl.closest('tr, .ui-grid-row, .field, .form-group, fieldset, .ui-panelgrid-cell');
-                    return row || lbl.parentElement;
-                }}
-            }}
-            return null;
-        }}
-
-        const container = findContainer(keywords);
-        if (!container) return;
-
-        // Tenta select nativo
-        const sel = container.querySelector('select');
-        if (sel) {{
-            const opt = Array.from(sel.options).find(o =>
-                o.text.trim().toLowerCase().includes(valueLower) ||
-                o.value.trim().toLowerCase().includes(valueLower)
-            );
-            if (opt) {{
-                sel.value = opt.value;
-                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            }}
-            return;
-        }}
-
-        // Tenta radio buttons
-        const radios = Array.from(container.querySelectorAll('input[type=radio]'));
-        for (const radio of radios) {{
-            const lbl = document.querySelector('label[for="' + radio.id + '"]');
-            const labelTxt = (lbl ? lbl.textContent : radio.value).trim().toLowerCase();
-            if (labelTxt.includes(valueLower)) {{
-                radio.click();
-                return;
-            }}
-        }}
-
-        // Tenta PrimeFaces dropdown (.ui-selectonemenu)
-        const pfDrop = container.querySelector('.ui-selectonemenu');
-        if (pfDrop) {{
-            // Abre o dropdown
-            const trigger = pfDrop.querySelector('.ui-selectonemenu-trigger');
-            if (trigger) trigger.click();
-            setTimeout(() => {{
-                const panel = document.querySelector('.ui-selectonemenu-panel:not([style*="display: none"])');
-                if (!panel) return;
-                const items = Array.from(panel.querySelectorAll('li.ui-selectonemenu-item'));
-                const target = items.find(i => i.textContent.trim().toLowerCase().includes(valueLower));
-                if (target) target.click();
-            }}, 400);
-        }}
-    }})()""")
-
-
-def _fill_text_field(page, label_keywords: list[str], value: str):
-    """Preenche um campo de texto identificado pelo label."""
-    keywords_js = str(label_keywords)
-    page.evaluate(f"""(() => {{
-        const keywords = {keywords_js};
-        const value = {repr(value)};
-
-        const allLabels = Array.from(
-            document.querySelectorAll('label, th, .ui-outputlabel')
-        );
-        for (const lbl of allLabels) {{
-            const txt = lbl.textContent.trim().toLowerCase();
-            if (keywords.every(k => txt.includes(k))) {{
-                const forId = lbl.getAttribute('for');
-                const field = forId ? document.getElementById(forId) : null;
-                const container = lbl.closest('tr, .field, .form-group');
-                const inp = field || (container && container.querySelector('input[type=text], textarea'));
-                if (inp) {{
-                    inp.value = value;
-                    inp.dispatchEvent(new Event('input',  {{ bubbles: true }}));
-                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return;
-                }}
-            }}
-        }}
-    }})()""")
-
-
-def _confirm_task(page):
-    """Rola a página e clica em Confirmar."""
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    time.sleep(0.5)
-
-    result = page.evaluate("""(() => {
-        // Tenta pelo ID exato do preposto-rpa (mesmo sistema)
-        const byId = document.getElementById('btnConfirmaSim');
-        if (byId) { byId.click(); return 'ok'; }
-
-        // Tenta qualquer botão "Confirmar"
-        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-        const confirmar = btns.find(b =>
-            b.textContent.trim().toLowerCase().includes('confirmar') ||
-            (b.value && b.value.trim().toLowerCase().includes('confirmar'))
-        );
-        if (confirmar) { confirmar.click(); return 'ok'; }
-        return 'nao_encontrado';
-    })()""")
-
-    if result != "ok":
-        raise Exception("Botão 'Confirmar' não encontrado no formulário")
-
-    time.sleep(2)
-    page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
-
-
-# ── Navegação de processo (comum aos dois sistemas) ───────────────────────────
-
-def _navigate_to_process(page, numero: str, base_url: str):
-    """Navega até a página do processo usando o autocomplete global."""
+def _navigate_to_process(page, numero):
     page.wait_for_selector('[id*="globaSearchAutocomplete_input"]', timeout=PAGE_TIMEOUT)
 
     clicked = False
@@ -844,7 +268,6 @@ def _navigate_to_process(page, numero: str, base_url: str):
             if result == "clicado":
                 clicked = True
                 break
-
         if clicked:
             break
 
@@ -859,6 +282,383 @@ def _navigate_to_process(page, numero: str, base_url: str):
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
 
 
+def _click_pauta_andamento(page):
+    result = page.evaluate("""(() => {
+        const candidates = Array.from(
+            document.querySelectorAll('a, button, li > a, [role="tab"], .ui-menuitem-link')
+        );
+        const el = candidates.find(e => {
+            const t = e.textContent.trim().toLowerCase();
+            return t.includes('pauta') && t.includes('andamento');
+        });
+        if (el) { el.click(); return 'ok'; }
+        return 'nao_encontrado';
+    })()""")
+    if result != "ok":
+        raise Exception("Aba 'Pauta e Andamento' não encontrada")
+    time.sleep(1.5)
+    page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+
+
+# ── Localizar e abrir tarefa ──────────────────────────────────────────────────
+
+def _find_verify_and_open_task(page, data_audiencia, horario, log) -> str:
+    date_part = data_audiencia.strip()[:10]   # DD/MM/YYYY
+    time_part = horario.strip()[:5]           # HH:MM
+
+    task_count = page.evaluate("""(() => {
+        return Array.from(document.querySelectorAll('tr')).filter(r =>
+            r.textContent.toLowerCase().includes('externo') &&
+            r.textContent.toLowerCase().includes('relat') &&
+            r.textContent.toLowerCase().includes('audi')
+        ).length;
+    })()""")
+
+    if task_count == 0:
+        return "ja_cumprido"
+
+    matched_index = None
+
+    for i in range(task_count):
+        match = _verify_task_date(page, i, date_part, time_part, log)
+        if match:
+            matched_index = i
+            break
+
+    if matched_index is None:
+        if task_count == 1:
+            # Único prazo — usa mesmo sem confirmar data (já logou aviso)
+            matched_index = 0
+        else:
+            raise Exception(
+                f"Nenhum dos {task_count} prazos 'Externo: Inserir Relatório' "
+                f"corresponde a {data_audiencia} {horario}."
+            )
+
+    _click_check_icon(page, matched_index)
+    return "ok"
+
+
+def _verify_task_date(page, row_index: int, date_part: str, time_part: str, log) -> bool:
+    lupa_result = page.evaluate(f"""(() => {{
+        const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
+            r.textContent.toLowerCase().includes('externo') &&
+            r.textContent.toLowerCase().includes('relat') &&
+            r.textContent.toLowerCase().includes('audi')
+        );
+        const row = rows[{row_index}];
+        if (!row) return 'sem_row';
+
+        const buttons = Array.from(row.querySelectorAll('button, a'));
+        let btn = buttons.find(b =>
+            b.innerHTML.toLowerCase().includes('search') ||
+            b.innerHTML.toLowerCase().includes('lupa')  ||
+            b.innerHTML.toLowerCase().includes('zoom')  ||
+            b.innerHTML.toLowerCase().includes('eye')   ||
+            (b.querySelector && b.querySelector('[class*="search"],[class*="lupa"]'))
+        );
+        if (!btn) {{
+            btn = buttons.find(b =>
+                !b.innerHTML.toLowerCase().includes('check') &&
+                !b.innerHTML.toLowerCase().includes('tick')  &&
+                !b.id.toLowerCase().includes('confirm')
+            );
+        }}
+        if (!btn && buttons.length > 0) btn = buttons[0];
+        if (!btn) return 'sem_lupa';
+        btn.click();
+        return 'ok';
+    }})()""")
+
+    if lupa_result != "ok":
+        return True  # Sem lupa, assume correto
+
+    time.sleep(1.2)
+
+    popup_text = page.evaluate("""(() => {
+        for (const sel of ['.ui-dialog','.ui-overlaypanel','[class*="popup"]','[class*="modal"]']) {
+            const el = document.querySelector(sel);
+            if (el && el.offsetParent !== null) return el.textContent;
+        }
+        return null;
+    })()""")
+
+    # Fecha popup
+    page.evaluate("""(() => {
+        const closeSelectors = ['.ui-dialog-titlebar-close','button[aria-label="Close"]'];
+        for (const sel of closeSelectors) {
+            const btn = document.querySelector(sel);
+            if (btn) { btn.click(); return; }
+        }
+        const fechar = Array.from(document.querySelectorAll('button, a'))
+            .find(b => b.textContent.trim().toLowerCase() === 'fechar');
+        if (fechar) fechar.click();
+    })()""")
+    time.sleep(0.5)
+
+    if popup_text:
+        has_date = (not date_part) or (date_part in popup_text)
+        has_time = (not time_part) or (time_part in popup_text)
+        return has_date and has_time
+
+    return True
+
+
+def _click_check_icon(page, row_index: int):
+    result = page.evaluate(f"""(() => {{
+        const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
+            r.textContent.toLowerCase().includes('externo') &&
+            r.textContent.toLowerCase().includes('relat') &&
+            r.textContent.toLowerCase().includes('audi')
+        );
+        const row = rows[{row_index}];
+        if (!row) return 'sem_row';
+
+        const buttons = Array.from(row.querySelectorAll('button, a'));
+        let btn = buttons.find(b =>
+            b.innerHTML.toLowerCase().includes('check') ||
+            b.innerHTML.toLowerCase().includes('tick')  ||
+            b.id.toLowerCase().includes('confirm')      ||
+            b.id.toLowerCase().includes('cumprir')      ||
+            (b.querySelector && b.querySelector('[class*="check"],[class*="confirm"]'))
+        );
+        if (!btn && buttons.length > 0) btn = buttons[buttons.length - 1];
+        if (!btn) return 'sem_check';
+        btn.click();
+        return btn.id || 'clicado';
+    }})()""")
+
+    if result in ("sem_row", "sem_check"):
+        raise Exception(f"Botão de check/confirmar não encontrado: {result}")
+
+    try:
+        page.wait_for_url("**agendamentoContenciosoConfirm.elaw**", timeout=PAGE_TIMEOUT)
+    except PWTimeout:
+        try:
+            page.wait_for_selector(
+                '[id*="confirmar"], [id*="btnConfirm"], .ui-dialog',
+                state="visible",
+                timeout=PAGE_TIMEOUT,
+            )
+        except PWTimeout:
+            raise Exception(
+                f"Formulário de cumprimento não carregou (URL: {page.url})"
+            )
+
+
+# ── Preenchimento do formulário ───────────────────────────────────────────────
+
+# Mapeamento: chave da row → lista de palavras-chave do label no Carrefour
+_FIELD_MAP = [
+    # (row_key,                      label_keywords,                      tipo)
+    ("nome_preposto",               ["preposto", "compareceu"],           "sim_from_value"),
+    ("advogado_pontual",            ["advogado", "horario"],              "sim_nao"),
+    ("advogado_contato",            ["advogado", "contato"],              "sim_nao"),
+    ("preposto_ouvido",             ["ouvido"],                           "sim_nao"),
+    ("orientacoes_claras",          ["orientacoes", "claras"],            "sim_nao"),
+    ("intercorrencias",             ["intercorr"],                        "text"),
+    ("teve_testemunha",             ["teve", "testemunha"],               "sim_nao"),
+    ("reclamada_testemunha",        ["reclamada", "testemunha"],          "sim_nao"),
+    ("reclamada_testemunha_ouvida", ["reclamada", "ouvida"],              "sim_nao"),
+    ("reclamada_testemunha_nome",   ["testemunha", "reclamada"],          "text"),
+    ("reclamante_testemunha",       ["reclamante", "testemunha"],         "sim_nao"),
+    ("reclamante_testemunha_ouvida",["reclamante", "ouvida"],             "sim_nao"),
+    ("reclamante_testemunha_nome",  ["testemunha", "reclamante"],         "text"),
+    ("resultado_audiencia",         ["resultado"],                         "dropdown"),
+]
+
+
+def _fill_form(page, row: dict):
+    for row_key, keywords, field_type in _FIELD_MAP:
+        value = str(row.get(row_key) or "").strip()
+        if not value or value.lower() == "nan":
+            continue
+
+        if field_type == "sim_from_value":
+            # "Preposto designado compareceu" → Sim se há nome do preposto
+            _set_sim_nao(page, keywords, "Sim")
+
+        elif field_type == "sim_nao":
+            # Valor direto: "SIM"/"NÃO" → clica no radio/checkbox certo
+            _set_sim_nao(page, keywords, value)
+
+        elif field_type == "text":
+            # Campo de texto livre
+            _set_text(page, keywords, value)
+
+        elif field_type == "dropdown":
+            # Dropdown PrimeFaces
+            _set_dropdown(page, keywords, value)
+
+        time.sleep(0.3)
+
+
+def _set_sim_nao(page, keywords: list, value: str):
+    kw_js    = str(keywords)
+    val_low  = value.strip().lower()
+
+    page.evaluate(f"""(() => {{
+        const keywords = {kw_js};
+        const valueLow = '{val_low}';
+
+        function containerFor(kws) {{
+            for (const lbl of document.querySelectorAll(
+                'label, th, td, .ui-outputlabel, [class*="label"]'
+            )) {{
+                const t = lbl.textContent.trim().toLowerCase();
+                if (kws.every(k => t.includes(k))) {{
+                    return lbl.closest('tr, .ui-grid-row, .field, .form-group, fieldset') || lbl.parentElement;
+                }}
+            }}
+            return null;
+        }}
+
+        const container = containerFor(keywords);
+        if (!container) return;
+
+        // Tenta radio buttons
+        for (const radio of container.querySelectorAll('input[type=radio]')) {{
+            const lbl = document.querySelector('label[for="' + radio.id + '"]');
+            const txt = (lbl ? lbl.textContent : radio.value).trim().toLowerCase();
+            if (txt.includes(valueLow) || valueLow.includes(txt)) {{
+                radio.click();
+                return;
+            }}
+        }}
+
+        // Tenta select nativo
+        const sel = container.querySelector('select');
+        if (sel) {{
+            const opt = Array.from(sel.options).find(o =>
+                o.text.trim().toLowerCase().includes(valueLow)
+            );
+            if (opt) {{
+                sel.value = opt.value;
+                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }}
+            return;
+        }}
+
+        // Tenta PrimeFaces selectOneRadio / selectBooleanCheckbox por texto
+        const items = container.querySelectorAll('.ui-radiobutton, .ui-chkbox');
+        for (const item of items) {{
+            const lbl = item.nextElementSibling || item.previousElementSibling;
+            if (lbl && lbl.textContent.trim().toLowerCase().includes(valueLow)) {{
+                item.querySelector('input, .ui-radiobutton-box, .ui-chkbox-box')?.click();
+                return;
+            }}
+        }}
+    }})()""")
+
+
+def _set_dropdown(page, keywords: list, value: str):
+    kw_js   = str(keywords)
+    val_low = value.strip().lower()
+
+    page.evaluate(f"""(() => {{
+        const keywords = {kw_js};
+        const valueLow = '{val_low}';
+
+        function containerFor(kws) {{
+            for (const lbl of document.querySelectorAll(
+                'label, th, td, .ui-outputlabel, [class*="label"]'
+            )) {{
+                const t = lbl.textContent.trim().toLowerCase();
+                if (kws.every(k => t.includes(k))) {{
+                    return lbl.closest('tr, .ui-grid-row, .field, .form-group, fieldset') || lbl.parentElement;
+                }}
+            }}
+            return null;
+        }}
+
+        const container = containerFor(keywords);
+        if (!container) return;
+
+        // Select nativo
+        const sel = container.querySelector('select');
+        if (sel) {{
+            const opt = Array.from(sel.options).find(o =>
+                o.text.trim().toLowerCase().includes(valueLow)
+            );
+            if (opt) {{
+                sel.value = opt.value;
+                sel.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }}
+            return;
+        }}
+
+        // PrimeFaces selectOneMenu
+        const pfDrop = container.querySelector('.ui-selectonemenu');
+        if (pfDrop) {{
+            const trigger = pfDrop.querySelector('.ui-selectonemenu-trigger');
+            if (trigger) {{
+                trigger.click();
+                setTimeout(() => {{
+                    const panel = document.querySelector('.ui-selectonemenu-panel:not([style*="display: none"])');
+                    if (!panel) return;
+                    const target = Array.from(panel.querySelectorAll('li')).find(
+                        i => i.textContent.trim().toLowerCase().includes(valueLow)
+                    );
+                    if (target) target.click();
+                }}, 500);
+            }}
+        }}
+    }})()""")
+    time.sleep(0.6)  # aguarda o setTimeout do dropdown
+
+
+def _set_text(page, keywords: list, value: str):
+    kw_js = str(keywords)
+
+    page.evaluate(f"""(() => {{
+        const keywords = {kw_js};
+        const value = {repr(value)};
+
+        for (const lbl of document.querySelectorAll(
+            'label, th, td, .ui-outputlabel, [class*="label"]'
+        )) {{
+            const t = lbl.textContent.trim().toLowerCase();
+            if (keywords.every(k => t.includes(k))) {{
+                const forId = lbl.getAttribute('for');
+                const field = forId ? document.getElementById(forId) : null;
+                const container = lbl.closest('tr, .field, .form-group');
+                const inp = field || (container && container.querySelector(
+                    'input[type=text], textarea'
+                ));
+                if (inp) {{
+                    inp.value = value;
+                    inp.dispatchEvent(new Event('input',  {{ bubbles: true }}));
+                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    return;
+                }}
+            }}
+        }}
+    }})()""")
+
+
+def _confirm_task(page):
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    time.sleep(0.5)
+
+    result = page.evaluate("""(() => {
+        const byId = document.getElementById('btnConfirmaSim');
+        if (byId) { byId.click(); return 'ok'; }
+        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+        const btn = btns.find(b =>
+            b.textContent.trim().toLowerCase().includes('confirmar') ||
+            (b.value && b.value.trim().toLowerCase().includes('confirmar'))
+        );
+        if (btn) { btn.click(); return 'ok'; }
+        return 'nao_encontrado';
+    })()""")
+
+    if result != "ok":
+        raise Exception("Botão 'Confirmar' não encontrado no formulário")
+
+    time.sleep(2)
+    page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+
+
 # ── Relatório Excel ───────────────────────────────────────────────────────────
 
 def _build_report(results: list[dict], path: Path):
@@ -866,7 +666,8 @@ def _build_report(results: list[dict], path: Path):
     ws = wb.active
     ws.title = "Resultado"
 
-    headers = ["Número Processo", "Data Audiência", "Status", "Detalhe", "Observação", "Horário"]
+    headers = ["Número Processo", "Data Audiência", "Resultado", "Intercorrências",
+               "Status", "Detalhe", "Horário"]
     ws.append(headers)
     for cell in ws[1]:
         cell.fill = PatternFill("solid", fgColor="1F4E79")
@@ -883,16 +684,16 @@ def _build_report(results: list[dict], path: Path):
         ws.append([
             r["numero_processo"],
             r["data_audiencia"],
+            r["resultado"],
+            r["intercorrencias"],
             r["status"],
             r["detalhe"],
-            r["observacao"],
-            r["horario"],
+            r["horario_exec"],
         ])
-        fill = fills.get(r["status"], fills["ERRO"])
         for cell in ws[ws.max_row]:
-            cell.fill = fill
+            cell.fill = fills.get(r["status"], fills["ERRO"])
 
-    for col, w in zip("ABCDEF", [22, 16, 16, 45, 60, 10]):
+    for col, w in zip("ABCDEFG", [24, 16, 22, 50, 14, 45, 10]):
         ws.column_dimensions[col].width = w
 
     wb.save(path)

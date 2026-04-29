@@ -204,9 +204,9 @@
     <!-- Info -->
     <div class="info-banner">
       <strong>Como funciona</strong>
-      Para cada processo, o app lê os dados preenchidos pelo correspondente no <b>Elaw Viseu</b>
-      e preenche automaticamente o relatório no <b>Elaw Carrefour</b>.
-      Processos com Observação/Intercorrência são sinalizados no relatório final para revisão manual.
+      Envie o modelo de relatório VOX preenchido (com Nome Preposto, Testemunhas, Resultado, etc.).
+      O app preenche automaticamente a tarefa <b>"Externo: Inserir Relatório da Audiência"</b> no <b>Elaw Carrefour</b>
+      para cada processo. Linhas com intercorrências são sinalizadas em amarelo para revisão manual.
     </div>
 
     <!-- Step 1: Upload -->
@@ -217,7 +217,7 @@
             d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
         </svg>
         <strong>Clique ou arraste a planilha aqui</strong>
-        <p>Colunas obrigatórias: <code>Número do Processo</code> · <code>Data da Audiência</code></p>
+        <p>Use o <b>Modelo Relatório VOX</b> — colunas obrigatórias: <code>Número do Processo</code> · <code>Data da Audiência</code></p>
       </div>
       <input type="file" id="file-input" accept=".xlsx" />
     </div>
@@ -308,7 +308,7 @@
       total = data.total;
       previewTitle.textContent = `${data.total} processo(s) carregado(s) — ${file.name}`;
       previewList.innerHTML = data.preview
-        .map(r => `<li>${r.processo}${r.data ? " — " + r.data : ""}</li>`)
+        .map(r => `<li>${r.processo}${r.data ? " — " + r.data : ""}${r.horario ? " " + r.horario : ""}${r.resultado ? " · " + r.resultado : ""}</li>`)
         .join("") + (data.total > 5 ? `<li>... e mais ${data.total - 5}</li>` : "");
 
       preview.style.display  = "block";
