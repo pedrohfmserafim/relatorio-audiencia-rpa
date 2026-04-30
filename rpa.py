@@ -232,8 +232,7 @@ def _recover_page(page, log):
 
 def _process_row(page, numero, data_audiencia, horario, row, log):
     _navigate_to_process(page, numero)
-    tab_result = _click_pauta_andamento(page)
-    log(f"  🗂 Aba: {tab_result}", "info")
+    # "Pauta e Andamento" já abre por padrão ao entrar no processo
 
     task_status = _find_verify_and_open_task(page, data_audiencia, horario, log)
     if task_status == "ja_cumprido":
