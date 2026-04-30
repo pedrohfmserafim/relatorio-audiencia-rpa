@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Relatório Audiência RPA — Elaw</title>
+  <title>Relatório Audiência RPA — VOX</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f0f2f5;
-      color: #1a1a1a;
+      background: #f5f0ec;
+      color: #1e1f1f;
       min-height: 100vh;
       display: flex;
       align-items: flex-start;
@@ -21,63 +21,83 @@
     .card {
       background: #fff;
       border-radius: 12px;
-      box-shadow: 0 2px 16px rgba(0,0,0,.10);
+      box-shadow: 0 2px 16px rgba(30,31,31,.12);
       width: 100%;
       max-width: 760px;
       overflow: hidden;
     }
 
     .card-header {
-      background: #1F4E79;
+      background: #1e1f1f;
       color: #fff;
       padding: 24px 32px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
     }
-    .card-header h1 { font-size: 1.25rem; font-weight: 600; }
-    .card-header p  { font-size: .85rem; opacity: .8; margin-top: 4px; }
+
+    /* VOX logo SVG */
+    .vox-logo {
+      flex-shrink: 0;
+      width: 72px;
+      height: auto;
+    }
+
+    .header-text { flex: 1; }
+    .header-text h1 { font-size: 1.15rem; font-weight: 600; color: #fff; }
+    .header-text p  { font-size: .82rem; color: #8b8c8c; margin-top: 3px; }
+
+    /* Logout link */
+    .logout-link {
+      font-size: .75rem;
+      color: #6f7070;
+    }
+    .logout-link a { color: #8b8c8c; text-decoration: none; }
+    .logout-link a:hover { color: #fff; }
 
     .card-body { padding: 32px; display: flex; flex-direction: column; gap: 24px; }
 
     /* Info banner */
     .info-banner {
-      background: #eff6ff;
-      border: 1px solid #bfdbfe;
+      background: #fdf4ee;
+      border: 1px solid #e8c9af;
       border-radius: 8px;
       padding: 12px 16px;
       font-size: .82rem;
-      color: #1e40af;
+      color: #7a3d18;
       line-height: 1.5;
     }
-    .info-banner strong { display: block; margin-bottom: 3px; font-size: .85rem; }
+    .info-banner strong { display: block; margin-bottom: 3px; font-size: .85rem; color: #be6732; }
 
     /* Upload zone */
     .upload-zone {
-      border: 2px dashed #b0c4de;
+      border: 2px dashed #d4a882;
       border-radius: 8px;
       padding: 36px;
       text-align: center;
       cursor: pointer;
       transition: border-color .2s, background .2s;
     }
-    .upload-zone:hover, .upload-zone.drag { border-color: #1F4E79; background: #f0f6ff; }
-    .upload-zone svg { width: 40px; height: 40px; color: #1F4E79; margin-bottom: 10px; }
-    .upload-zone p   { font-size: .9rem; color: #555; }
-    .upload-zone strong { display: block; font-size: 1rem; color: #1F4E79; margin-bottom: 4px; }
+    .upload-zone:hover, .upload-zone.drag { border-color: #be6732; background: #fdf4ee; }
+    .upload-zone svg { width: 40px; height: 40px; color: #be6732; margin-bottom: 10px; }
+    .upload-zone p   { font-size: .9rem; color: #6f7070; }
+    .upload-zone strong { display: block; font-size: 1rem; color: #be6732; margin-bottom: 4px; }
     #file-input { display: none; }
 
     /* Preview */
     #preview { display: none; }
     .preview-info {
-      background: #e8f4e8;
-      border: 1px solid #a8d5a2;
+      background: #fdf4ee;
+      border: 1px solid #e8c9af;
       border-radius: 8px;
       padding: 14px 18px;
       font-size: .875rem;
-      color: #2d6a2d;
+      color: #7a3d18;
     }
-    .preview-info strong { display: block; margin-bottom: 6px; }
+    .preview-info strong { display: block; margin-bottom: 6px; color: #be6732; }
     .preview-list { list-style: none; padding: 0; margin-top: 6px; }
-    .preview-list li { padding: 2px 0; color: #444; font-size: .82rem; }
-    .preview-list li::before { content: "→ "; color: #2d6a2d; }
+    .preview-list li { padding: 2px 0; color: #545c59; font-size: .82rem; }
+    .preview-list li::before { content: "→ "; color: #be6732; }
 
     /* Buttons */
     .btn-row { display: flex; gap: 12px; }
@@ -93,17 +113,17 @@
     button:disabled { opacity: .45; cursor: not-allowed; }
 
     #btn-execute {
-      background: #1F4E79;
+      background: #be6732;
       color: #fff;
       flex: 1;
     }
-    #btn-execute:not(:disabled):hover { background: #163a5c; }
+    #btn-execute:not(:disabled):hover { background: #a05628; }
 
     #btn-reset {
-      background: #e5e7eb;
-      color: #374151;
+      background: #e8e5e2;
+      color: #545c59;
     }
-    #btn-reset:hover { background: #d1d5db; }
+    #btn-reset:hover { background: #d8d4d0; }
 
     /* Log area */
     #log-section { display: none; }
@@ -113,8 +133,8 @@
       align-items: center;
       margin-bottom: 10px;
     }
-    .log-header span { font-weight: 600; font-size: .9rem; }
-    .progress-text   { font-size: .8rem; color: #666; }
+    .log-header span { font-weight: 600; font-size: .9rem; color: #1e1f1f; }
+    .progress-text   { font-size: .8rem; color: #6f7070; }
 
     #log-box {
       background: #0d1117;
@@ -132,41 +152,42 @@
     #log-box .ok    { color: #56d364; }
     #log-box .error { color: #f85149; }
     #log-box .warn  { color: #e3b341; }
-    #log-box .info  { color: #79c0ff; }
+    #log-box .info  { color: #f0a06a; }
     #log-box .done  { color: #56d364; font-weight: bold; }
 
     /* Controls during run */
     #run-controls { display: none; gap: 8px; }
     #btn-pause {
-      background: #b45309;
+      background: #be6732;
       color: #fff;
       flex: 1;
       padding: 10px;
     }
-    #btn-pause:hover { background: #92400e; }
-    #btn-pause.paused { background: #1F4E79; }
-    #btn-pause.paused:hover { background: #163a5c; }
+    #btn-pause:hover { background: #a05628; }
+    #btn-pause.paused { background: #545c59; }
+    #btn-pause.paused:hover { background: #3a413e; }
     #btn-partial {
-      background: #374151;
+      background: #545c59;
       color: #fff;
       flex: 1;
       padding: 10px;
     }
-    #btn-partial:hover { background: #1f2937; }
+    #btn-partial:hover { background: #3a413e; }
 
     /* Download */
     #download-section { display: none; }
     #btn-download {
-      background: #2d6a2d;
+      background: #be6732;
       color: #fff;
       width: 100%;
       padding: 12px;
+      font-size: 1rem;
     }
-    #btn-download:hover { background: #1f4d1f; }
+    #btn-download:hover { background: #a05628; }
 
     /* Progress bar */
     .progress-bar-wrap {
-      background: #e5e7eb;
+      background: #e8e5e2;
       border-radius: 4px;
       height: 6px;
       margin-top: 8px;
@@ -175,27 +196,28 @@
     }
     .progress-bar-fill {
       height: 100%;
-      background: #1F4E79;
+      background: #be6732;
       width: 0%;
       transition: width .4s ease;
     }
 
-    /* Logout link */
-    .logout-link {
-      text-align: right;
-      font-size: .78rem;
-      color: rgba(255,255,255,.6);
-      margin-top: 2px;
-    }
-    .logout-link a { color: rgba(255,255,255,.8); text-decoration: none; }
-    .logout-link a:hover { color: #fff; }
+    /* Divider */
+    hr { border: none; border-top: 1px solid #ede8e3; }
   </style>
 </head>
 <body>
 <div class="card">
   <div class="card-header">
-    <h1>Relatório Audiência RPA</h1>
-    <p>Cumprimento automático da tarefa "Externo: Inserir Relatório de Audiência" — Elaw Carrefour</p>
+    <!-- VOX logo inline SVG -->
+    <svg class="vox-logo" viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="VOX">
+      <text x="0" y="72" font-family="Arial Rounded MT Bold, Arial, sans-serif" font-size="88" font-weight="900" letter-spacing="-4">
+        <tspan fill="#be6732">V</tspan><tspan fill="#c97840">O</tspan><tspan fill="#d48a50">X</tspan>
+      </text>
+    </svg>
+    <div class="header-text">
+      <h1>Relatório Audiência RPA</h1>
+      <p>Cumprimento automático da tarefa "Externo: Inserir Relatório de Audiência" — Elaw Carrefour</p>
+    </div>
     <div class="logout-link"><a href="/logout">Sair</a></div>
   </div>
 
