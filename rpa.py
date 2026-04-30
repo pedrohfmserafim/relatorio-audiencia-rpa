@@ -198,16 +198,15 @@ def _auto_login(page, log):
 
 
 def _is_login_page(page) -> bool:
-    url = page.url.lower()
-    if any(k in url for k in ("login", "signin", "sso", "auth", "microsoftonline")):
-        return True
+    """Detecta página de login de forma conservadora — só pela presença do form visível."""
     try:
         return bool(page.evaluate("""(() => {
             const isVisible = el => el && el.offsetParent !== null
                 && getComputedStyle(el).display !== 'none'
                 && getComputedStyle(el).visibility !== 'hidden';
+            // Só considera login se AMBOS os campos estiverem visíveis simultaneamente
             return isVisible(document.getElementById('username'))
-                || isVisible(document.getElementById('authKey'));
+                && isVisible(document.getElementById('authKey'));
         })()"""))
     except Exception:
         return False
@@ -216,7 +215,6 @@ def _is_login_page(page) -> bool:
 def _recover_page(page, log):
     try:
         page.goto(f"{ELAW_URL}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
-        # Sessão pode ter expirado durante a execução
         if _is_login_page(page):
             log("  🔑 Sessão expirada — refazendo login...", "warn")
             _auto_login(page, log)
@@ -289,32 +287,65 @@ def _navigate_to_process(page, numero):
 
 
 def _click_pauta_andamento(page):
-    # Aguarda a página estabilizar antes de buscar as abas
+    """Clica na aba 'Pauta e Andamento'. Usa locator nativo do Playwright (mais robusto)."""
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
-    time.sleep(0.8)
+    time.sleep(0.5)
 
+    # Estratégia 1: locator por texto exato (Playwright normaliza espaços/encoding)
+    try:
+        loc = page.get_by_text("Pauta e Andamento", exact=True).first
+        loc.wait_for(state="visible", timeout=8_000)
+        loc.click()
+        time.sleep(1.5)
+        page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+        return "ok:get_by_text-exact"
+    except Exception:
+        pass
+
+    # Estratégia 2: locator por texto parcial
+    try:
+        loc = page.locator("text=Pauta e Andamento").first
+        loc.wait_for(state="visible", timeout=5_000)
+        loc.click()
+        time.sleep(1.5)
+        page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+        return "ok:locator-text"
+    except Exception:
+        pass
+
+    # Estratégia 3: JS — busca em toda a página (fallback)
     result = page.evaluate("""(() => {
-        // Busca em TODOS os elementos — o Elaw Carrefour usa estrutura de abas variada
-        const all = Array.from(document.querySelectorAll('*'));
-        for (const el of all) {
-            // Só elementos folha ou com texto direto
-            const t = el.textContent.trim().toLowerCase();
-            if (!t.includes('pauta') || !t.includes('andamento')) continue;
-            // Evita containers enormes — o texto deve ser curto
-            if (t.length > 50) continue;
-            // Clica no próprio elemento ou no ancestral clicável
-            const clickable = el.closest('a, button, li, [role="tab"]') || el;
-            clickable.click();
-            return 'ok:' + el.tagName + '/' + el.className.substring(0, 40);
+        const walker = document.createTreeWalker(
+            document.body, NodeFilter.SHOW_TEXT
+        );
+        let node;
+        while ((node = walker.nextNode())) {
+            const t = node.textContent.trim().toLowerCase();
+            if (t === 'pauta e andamento') {
+                const el = node.parentElement;
+                const clickable = el.closest('a, button, li, [role="tab"]') || el;
+                clickable.click();
+                return 'ok:treewalker/' + el.tagName;
+            }
         }
-        return 'nao_encontrado';
+        // Debug: lista todos os textos de links visíveis
+        const links = Array.from(document.querySelectorAll('a, [role="tab"]'))
+            .filter(e => e.offsetParent !== null)
+            .map(e => e.textContent.trim().substring(0, 30))
+            .join(' | ');
+        return 'nao_encontrado|links:' + links.substring(0, 300);
     })()""")
 
     if result.startswith("nao_encontrado"):
+        # Salva screenshot para diagnóstico
+        try:
+            page.screenshot(path="/tmp/debug_pauta.png", full_page=False)
+        except Exception:
+            pass
         raise Exception(
-            "Aba 'Pauta e Andamento' não encontrada. "
-            "Verifique se o processo abre corretamente no Elaw Carrefour."
+            f"Aba 'Pauta e Andamento' não encontrada. Debug: {result}"
         )
+
     time.sleep(1.5)
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
     return result

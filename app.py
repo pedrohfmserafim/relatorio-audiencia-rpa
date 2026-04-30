@@ -273,6 +273,15 @@ def debug_screenshot():
     return send_file(path, mimetype="image/png")
 
 
+@app.route("/debug-pauta")
+@login_required
+def debug_pauta():
+    path = Path("/tmp/debug_pauta.png")
+    if not path.exists():
+        return jsonify({"erro": "Nenhum screenshot de aba disponível ainda"}), 404
+    return send_file(path, mimetype="image/png")
+
+
 # ── Error handlers ────────────────────────────────────────────────────────────
 @app.errorhandler(404)
 def not_found(e):
