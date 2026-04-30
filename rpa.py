@@ -20,8 +20,11 @@ import re
 import time
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font
+
+BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
 
 if os.environ.get("RENDER"):
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/opt/render/project/src/.playwright-browsers"
@@ -116,7 +119,7 @@ def run_automation(rows: list[dict], log, report_path: Path, state: dict | None 
                 "intercorrencias": intercorrencias,
                 "status":          status,
                 "detalhe":         detail,
-                "horario_exec":    datetime.now().strftime("%H:%M:%S"),
+                "horario_exec":    datetime.now(BRASILIA_TZ).strftime("%H:%M:%S"),
             }
             results.append(row_result)
             if state is not None:
@@ -236,11 +239,15 @@ def _process_row(page, numero, data_audiencia, horario, row, log):
 
     task_status = _find_verify_and_open_task(page, data_audiencia, horario, log)
     if task_status == "ja_cumprido":
+        _go_to_process_list(page)
         return "JÁ CUMPRIDO", "Tarefa já estava cumprida anteriormente"
 
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
     _fill_form(page, row)
     _confirm_task(page)
+
+    # Volta para a lista de processos — garante estado limpo para o próximo
+    _go_to_process_list(page)
     return "OK", "Relatório inserido com sucesso"
 
 
@@ -283,6 +290,19 @@ def _navigate_to_process(page, numero):
         raise Exception(f"Processo {numero} não encontrado no sistema")
 
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+
+
+def _go_to_process_list(page):
+    """Retorna à lista de processos — garante estado limpo entre iterações."""
+    try:
+        page.goto(f"{ELAW_URL}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
+        page.wait_for_selector(
+            '[id*="globaSearchAutocomplete_input"]',
+            state="visible",
+            timeout=PAGE_TIMEOUT,
+        )
+    except Exception:
+        pass  # Se falhar, _navigate_to_process tentará novamente
 
 
 def _click_pauta_andamento(page):
