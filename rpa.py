@@ -216,6 +216,11 @@ def _is_login_page(page) -> bool:
 def _recover_page(page, log):
     try:
         page.goto(f"{ELAW_URL}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
+        # Sessão pode ter expirado durante a execução
+        if _is_login_page(page):
+            log("  🔑 Sessão expirada — refazendo login...", "warn")
+            _auto_login(page, log)
+            page.goto(f"{ELAW_URL}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
         page.wait_for_selector(
             '[id*="globaSearchAutocomplete_input"]',
             state="visible",
@@ -229,7 +234,8 @@ def _recover_page(page, log):
 
 def _process_row(page, numero, data_audiencia, horario, row, log):
     _navigate_to_process(page, numero)
-    _click_pauta_andamento(page)
+    tab_result = _click_pauta_andamento(page)
+    log(f"  🗂 Aba: {tab_result}", "info")
 
     task_status = _find_verify_and_open_task(page, data_audiencia, horario, log)
     if task_status == "ja_cumprido":
@@ -283,21 +289,35 @@ def _navigate_to_process(page, numero):
 
 
 def _click_pauta_andamento(page):
+    # Aguarda a página estabilizar antes de buscar as abas
+    page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+    time.sleep(0.8)
+
     result = page.evaluate("""(() => {
-        const candidates = Array.from(
-            document.querySelectorAll('a, button, li > a, [role="tab"], .ui-menuitem-link')
-        );
-        const el = candidates.find(e => {
-            const t = e.textContent.trim().toLowerCase();
-            return t.includes('pauta') && t.includes('andamento');
-        });
-        if (el) { el.click(); return 'ok'; }
+        // Busca em TODOS os elementos — o Elaw Carrefour usa estrutura de abas variada
+        const all = Array.from(document.querySelectorAll('*'));
+        for (const el of all) {
+            // Só elementos folha ou com texto direto
+            const t = el.textContent.trim().toLowerCase();
+            if (!t.includes('pauta') || !t.includes('andamento')) continue;
+            // Evita containers enormes — o texto deve ser curto
+            if (t.length > 50) continue;
+            // Clica no próprio elemento ou no ancestral clicável
+            const clickable = el.closest('a, button, li, [role="tab"]') || el;
+            clickable.click();
+            return 'ok:' + el.tagName + '/' + el.className.substring(0, 40);
+        }
         return 'nao_encontrado';
     })()""")
-    if result != "ok":
-        raise Exception("Aba 'Pauta e Andamento' não encontrada")
+
+    if result.startswith("nao_encontrado"):
+        raise Exception(
+            "Aba 'Pauta e Andamento' não encontrada. "
+            "Verifique se o processo abre corretamente no Elaw Carrefour."
+        )
     time.sleep(1.5)
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+    return result
 
 
 # ── Localizar e abrir tarefa ──────────────────────────────────────────────────
