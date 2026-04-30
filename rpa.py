@@ -710,6 +710,8 @@ def _confirm_task(page):
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     time.sleep(0.5)
 
+    url_before = page.url
+
     result = page.evaluate("""(() => {
         const byId = document.getElementById('btnConfirmaSim');
         if (byId) { byId.click(); return 'ok'; }
@@ -727,6 +729,32 @@ def _confirm_task(page):
 
     time.sleep(2)
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+
+    # Verifica se o formulário foi realmente submetido (a URL deve mudar ou o
+    # formulário de confirmação deve sumir). Se ainda estiver na mesma URL,
+    # é provável que o JSF rejeitou a submissão por validação.
+    url_after = page.url
+    if url_after == url_before:
+        # Coleta mensagens de erro JSF visíveis para incluir no detalhe
+        error_msgs = page.evaluate("""(() => {
+            const msgs = [];
+            for (const sel of [
+                '.ui-message-error-detail',
+                '.ui-messages-error-detail',
+                '[class*="error"][class*="message"]',
+                '.ui-growl-message-error',
+            ]) {
+                document.querySelectorAll(sel).forEach(el => {
+                    const t = el.textContent.trim();
+                    if (t) msgs.push(t);
+                });
+            }
+            return msgs.join(' | ') || '(sem mensagem de erro visível)';
+        })()""")
+        raise Exception(
+            f"Formulário não foi submetido — página não navegou após Confirmar. "
+            f"Possível erro de validação JSF: {error_msgs}"
+        )
 
 
 # ── Relatório Excel ───────────────────────────────────────────────────────────
