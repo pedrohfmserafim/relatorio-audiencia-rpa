@@ -77,6 +77,7 @@ def run_automation(rows: list[dict], log, report_path: Path, state: dict | None 
 
         page.goto(f"{ELAW_URL}/processoList.elaw", wait_until="networkidle", timeout=PAGE_TIMEOUT)
         page.wait_for_selector('[id*="globaSearchAutocomplete_input"]', state="visible", timeout=PAGE_TIMEOUT)
+        time.sleep(3)  # aguarda sessão JSF estabilizar antes da primeira busca
 
         total = len(rows)
         for i, row in enumerate(rows, 1):
@@ -710,8 +711,6 @@ def _confirm_task(page):
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     time.sleep(0.5)
 
-    url_before = page.url
-
     result = page.evaluate("""(() => {
         const byId = document.getElementById('btnConfirmaSim');
         if (byId) { byId.click(); return 'ok'; }
@@ -730,31 +729,31 @@ def _confirm_task(page):
     time.sleep(2)
     page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
 
-    # Verifica se o formulário foi realmente submetido (a URL deve mudar ou o
-    # formulário de confirmação deve sumir). Se ainda estiver na mesma URL,
-    # é provável que o JSF rejeitou a submissão por validação.
-    url_after = page.url
-    if url_after == url_before:
-        # Coleta mensagens de erro JSF visíveis para incluir no detalhe
-        error_msgs = page.evaluate("""(() => {
-            const msgs = [];
-            for (const sel of [
-                '.ui-message-error-detail',
-                '.ui-messages-error-detail',
-                '[class*="error"][class*="message"]',
-                '.ui-growl-message-error',
-            ]) {
-                document.querySelectorAll(sel).forEach(el => {
+    # O Elaw usa AJAX (PrimeFaces) — a URL pode não mudar após submissão bem-sucedida.
+    # Em vez de checar URL, verifica se há mensagens de erro JSF visíveis.
+    # Se o formulário foi aceito, nenhuma mensagem de erro aparece.
+    error_msgs = page.evaluate("""(() => {
+        const msgs = new Set();
+        const selectors = [
+            '.ui-message-error-detail',
+            '.ui-messages-error-detail',
+            '.ui-messages-error-summary',
+            '.ui-message-error-summary',
+            '.ui-growl-item-message',
+        ];
+        for (const sel of selectors) {
+            document.querySelectorAll(sel).forEach(el => {
+                if (el.offsetParent !== null) {  // só elementos visíveis
                     const t = el.textContent.trim();
-                    if (t) msgs.push(t);
-                });
-            }
-            return msgs.join(' | ') || '(sem mensagem de erro visível)';
-        })()""")
-        raise Exception(
-            f"Formulário não foi submetido — página não navegou após Confirmar. "
-            f"Possível erro de validação JSF: {error_msgs}"
-        )
+                    if (t) msgs.add(t);
+                }
+            });
+        }
+        return [...msgs].join(' | ');
+    })()""")
+
+    if error_msgs:
+        raise Exception(f"Erro de validação JSF ao confirmar: {error_msgs}")
 
 
 # ── Relatório Excel ───────────────────────────────────────────────────────────
