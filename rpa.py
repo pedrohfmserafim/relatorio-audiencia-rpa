@@ -125,6 +125,13 @@ def run_automation(rows: list[dict], log, report_path: Path, state: dict | None 
             results.append(row_result)
             if state is not None:
                 state["results"].append(row_result)
+                # Persiste parcial em disco após cada processo — sobrevive a reinícios
+                partial_path = state.get("partial_path")
+                if partial_path:
+                    try:
+                        _build_report(state["results"], Path(partial_path))
+                    except Exception:
+                        pass
 
             icons = {"OK": "✅", "JÁ CUMPRIDO": "ℹ️", "ERRO": "❌", "OBSERVAÇÃO": "⚠️"}
             css   = {"OK": "ok", "JÁ CUMPRIDO": "ok", "ERRO": "error", "OBSERVAÇÃO": "warn"}

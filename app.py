@@ -96,6 +96,7 @@ _state = {
     "session_id":   None,
     "paused":       False,
     "results":      [],
+    "partial_path": None,   # caminho em disco para o relatório parcial
 }
 
 
@@ -187,12 +188,14 @@ def execute():
 
     out_dir = OUTPUT_DIR / sid
     out_dir.mkdir(parents=True, exist_ok=True)
-    report_path = out_dir / "relatorio_audiencias.xlsx"
+    report_path  = out_dir / "relatorio_audiencias.xlsx"
+    partial_path = out_dir / "relatorio_audiencias_parcial.xlsx"
 
     while not _log_queue.empty():
         _log_queue.get_nowait()
     _state.update({"running": True, "done": False, "report_ready": False,
-                   "session_id": sid, "paused": False, "results": []})
+                   "session_id": sid, "paused": False, "results": [],
+                   "partial_path": str(partial_path)})
 
     thread = threading.Thread(target=_run, args=(rows, report_path), daemon=True)
     thread.start()
@@ -242,13 +245,29 @@ def resume():
 @app.route("/partial-report")
 @login_required
 def partial_report():
+    # Tenta gerar a partir dos resultados em memória
     results = _state.get("results", [])
-    if not results:
-        return jsonify({"erro": "Nenhum resultado disponível ainda"}), 404
-    path = Path("/tmp/relatorio_audiencias_parcial.xlsx")
-    rpa_module._build_report(results, path)
-    return send_file(path, as_attachment=True,
-                     download_name="relatorio_audiencias_parcial.xlsx")
+    if results:
+        path = Path("/tmp/relatorio_audiencias_parcial.xlsx")
+        rpa_module._build_report(results, path)
+        return send_file(path, as_attachment=True,
+                         download_name="relatorio_audiencias_parcial.xlsx")
+
+    # Fallback: lê do disco (sobrevive a reinícios do servidor)
+    partial_path = _state.get("partial_path")
+    sid = session.get("upload_session")
+    candidates = []
+    if partial_path:
+        candidates.append(Path(partial_path))
+    if sid:
+        candidates.append(OUTPUT_DIR / sid / "relatorio_audiencias_parcial.xlsx")
+        candidates.append(OUTPUT_DIR / sid / "relatorio_audiencias.xlsx")
+    for p in candidates:
+        if p.exists():
+            return send_file(p, as_attachment=True,
+                             download_name="relatorio_audiencias_parcial.xlsx")
+
+    return jsonify({"erro": "Nenhum resultado disponível ainda"}), 404
 
 
 @app.route("/download")
