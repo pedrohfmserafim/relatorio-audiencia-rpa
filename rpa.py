@@ -228,6 +228,7 @@ def _recover_page(page, log):
             state="visible",
             timeout=PAGE_TIMEOUT,
         )
+        time.sleep(3)  # aguarda sessão JSF estabilizar após recovery/re-login
     except Exception as e:
         log(f"  ⚠️ Recovery falhou: {str(e)[:120]}", "warn")
 

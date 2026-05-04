@@ -303,7 +303,7 @@
   const btnPause      = document.getElementById("btn-pause");
   const btnPartial    = document.getElementById("btn-partial");
 
-  let total = 0, done = 0, evtSource = null, isPaused = false;
+  let total = 0, done = 0, evtSource = null, isPaused = false, sseFinished = false;
 
   // ── Upload ────────────────────────────────────────────────────────────────
   uploadZone.addEventListener("click", () => fileInput.click());
@@ -362,6 +362,7 @@
       }
       runControls.style.display = "flex";
       isPaused = false;
+      sseFinished = false;
       btnPause.textContent = "⏸ Pausar";
       btnPause.classList.remove("paused");
       startSSE();
@@ -379,6 +380,7 @@
       const data = JSON.parse(e.data);
       if (data.heartbeat) return;
       if (data.done) {
+        sseFinished = true;
         evtSource.close();
         btnReset.disabled = false;
         runControls.style.display = "none";
@@ -394,8 +396,10 @@
       }
     };
     evtSource.onerror = () => {
-      appendLog("Conexão SSE perdida.", "warn");
       evtSource.close();
+      if (sseFinished) return;
+      appendLog("⚡ Conexão SSE perdida — reconectando em 5s...", "warn");
+      setTimeout(() => { if (!sseFinished) startSSE(); }, 5000);
     };
   }
 
