@@ -382,105 +382,75 @@ def _click_pauta_andamento(page):
 # ── Localizar e abrir tarefa ──────────────────────────────────────────────────
 
 def _find_verify_and_open_task(page, data_audiencia, horario, log) -> str:
+    """
+    Localiza a tarefa 'Externo: Inserir Relatório da Audiência' correta.
+
+    Estratégia de matching (sem lupa — evita ambiguidade e falsos positivos):
+      1. Extrai datas DD/MM/YYYY do texto de cada linha da tarefa.
+      2. Usa a linha cujas datas contenham a data da audiência da planilha.
+      3. Se apenas uma tarefa existe e a data não está no texto → prossegue
+         com aviso (casos onde o Elaw não exibe a data na linha).
+      4. Se múltiplas tarefas e nenhuma com a data correta → ERRO. Nunca
+         preenche uma tarefa de data errada.
+    """
     date_part = data_audiencia.strip()[:10]   # DD/MM/YYYY
     time_part = horario.strip()[:5]           # HH:MM
 
-    task_count = page.evaluate("""(() => {
-        return Array.from(document.querySelectorAll('tr')).filter(r =>
+    # Lê todas as linhas da tarefa + extrai datas visíveis no texto
+    task_info = page.evaluate("""(() => {
+        const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
             r.textContent.toLowerCase().includes('externo') &&
             r.textContent.toLowerCase().includes('relat') &&
             r.textContent.toLowerCase().includes('audi')
-        ).length;
+        );
+        return rows.map((r, i) => {
+            const text = r.textContent || '';
+            const dates = (text.match(/\\d{2}\\/\\d{2}\\/\\d{4}/g) || []);
+            const times = (text.match(/\\d{2}:\\d{2}/g) || []);
+            return { index: i, text: text.substring(0, 300), dates, times };
+        });
     })()""")
+
+    task_count = len(task_info)
 
     if task_count == 0:
         return "ja_cumprido"
 
     matched_index = None
 
-    for i in range(task_count):
-        match = _verify_task_date(page, i, date_part, time_part, log)
-        if match:
-            matched_index = i
-            break
+    if date_part:
+        # Tenta match direto: procura a tarefa cuja linha contenha a data correta
+        for info in task_info:
+            row_dates = info.get("dates", [])
+            row_text  = info.get("text", "")
+            if date_part in row_dates or date_part in row_text:
+                matched_index = info["index"]
+                log(f"  🔍 Tarefa {info['index']+1}/{task_count}: data {date_part} confirmada na linha.", "info")
+                break
 
     if matched_index is None:
         if task_count == 1:
-            # Único prazo — usa mesmo sem confirmar data (já logou aviso)
-            matched_index = 0
+            # Única tarefa — sem risco de ambiguidade, prossegue com aviso
+            matched_index = task_info[0]["index"]
+            all_dates = task_info[0].get("dates", [])
+            log(
+                f"  ⚠️ Data {date_part} não encontrada no texto da tarefa "
+                f"(datas na linha: {all_dates or 'nenhuma'}). "
+                f"Única tarefa disponível — prosseguindo.",
+                "warn",
+            )
         else:
+            # Múltiplas tarefas e nenhuma com a data correta → recusa preencher
+            all_dates = [info.get("dates", []) for info in task_info]
             raise Exception(
-                f"Nenhum dos {task_count} prazos 'Externo: Inserir Relatório' "
-                f"corresponde a {data_audiencia} {horario}."
+                f"Processo tem {task_count} tarefas 'Externo: Inserir Relatório' "
+                f"mas nenhuma corresponde à data {date_part} {time_part}. "
+                f"Datas encontradas por tarefa: {all_dates}. "
+                f"Cumpra manualmente a tarefa correta e rode novamente."
             )
 
     _click_check_icon(page, matched_index)
     return "ok"
-
-
-def _verify_task_date(page, row_index: int, date_part: str, time_part: str, log) -> bool:
-    lupa_result = page.evaluate(f"""(() => {{
-        const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
-            r.textContent.toLowerCase().includes('externo') &&
-            r.textContent.toLowerCase().includes('relat') &&
-            r.textContent.toLowerCase().includes('audi')
-        );
-        const row = rows[{row_index}];
-        if (!row) return 'sem_row';
-
-        const buttons = Array.from(row.querySelectorAll('button, a'));
-        let btn = buttons.find(b =>
-            b.innerHTML.toLowerCase().includes('search') ||
-            b.innerHTML.toLowerCase().includes('lupa')  ||
-            b.innerHTML.toLowerCase().includes('zoom')  ||
-            b.innerHTML.toLowerCase().includes('eye')   ||
-            (b.querySelector && b.querySelector('[class*="search"],[class*="lupa"]'))
-        );
-        if (!btn) {{
-            btn = buttons.find(b =>
-                !b.innerHTML.toLowerCase().includes('check') &&
-                !b.innerHTML.toLowerCase().includes('tick')  &&
-                !b.id.toLowerCase().includes('confirm')
-            );
-        }}
-        if (!btn && buttons.length > 0) btn = buttons[0];
-        if (!btn) return 'sem_lupa';
-        btn.click();
-        return 'ok';
-    }})()""")
-
-    if lupa_result != "ok":
-        return True  # Sem lupa, assume correto
-
-    time.sleep(1.2)
-
-    popup_text = page.evaluate("""(() => {
-        for (const sel of ['.ui-dialog','.ui-overlaypanel','[class*="popup"]','[class*="modal"]']) {
-            const el = document.querySelector(sel);
-            if (el && el.offsetParent !== null) return el.textContent;
-        }
-        return null;
-    })()""")
-
-    # Fecha popup
-    page.evaluate("""(() => {
-        const closeSelectors = ['.ui-dialog-titlebar-close','button[aria-label="Close"]'];
-        for (const sel of closeSelectors) {
-            const btn = document.querySelector(sel);
-            if (btn) { btn.click(); return; }
-        }
-        const fechar = Array.from(document.querySelectorAll('button, a'))
-            .find(b => b.textContent.trim().toLowerCase() === 'fechar');
-        if (fechar) fechar.click();
-    })()""")
-    time.sleep(0.5)
-
-    if popup_text:
-        has_date = (not date_part) or (date_part in popup_text)
-        has_time = (not time_part) or (time_part in popup_text)
-        return has_date and has_time
-
-    return True
 
 
 def _click_check_icon(page, row_index: int):
