@@ -255,9 +255,38 @@ def _process_row(page, numero, data_audiencia, horario, row, log):
     _fill_form(page, row)
     _confirm_task(page)
 
-    # Volta para a lista de processos — garante estado limpo para o próximo
+    # Verifica se a tarefa foi realmente cumprida: navega de volta ao processo
+    # e confirma que a tarefa 'Externo: Inserir Relatório' não está mais pendente.
+    _verify_task_completed(page, numero, log)
+
     _go_to_process_list(page)
     return "OK", "Relatório inserido com sucesso"
+
+
+def _verify_task_completed(page, numero: str, log):
+    """Navega de volta ao processo e verifica que a tarefa não está mais pendente."""
+    try:
+        _navigate_to_process(page, numero)
+        page.wait_for_load_state("networkidle", timeout=PAGE_TIMEOUT)
+        still_open = page.evaluate("""(() => {
+            return Array.from(document.querySelectorAll('tr')).some(r =>
+                r.textContent.toLowerCase().includes('externo') &&
+                r.textContent.toLowerCase().includes('relat') &&
+                r.textContent.toLowerCase().includes('audi')
+            );
+        })()""")
+        if still_open:
+            raise Exception(
+                "Tarefa 'Externo: Inserir Relatório' ainda aparece como pendente "
+                "após o Confirmar — o formulário pode não ter sido salvo. "
+                "Verifique e cumpra manualmente."
+            )
+    except Exception as e:
+        err = str(e)
+        if "ainda aparece" in err:
+            raise
+        # Falha na navegação de volta — não bloqueia (a confirmação pode ter ocorrido)
+        log(f"  ⚠️ Não foi possível verificar conclusão da tarefa: {err[:120]}", "warn")
 
 
 # ── Navegação ─────────────────────────────────────────────────────────────────
@@ -385,18 +414,17 @@ def _find_verify_and_open_task(page, data_audiencia, horario, log) -> str:
     """
     Localiza a tarefa 'Externo: Inserir Relatório da Audiência' correta.
 
-    Estratégia de matching (sem lupa — evita ambiguidade e falsos positivos):
-      1. Extrai datas DD/MM/YYYY do texto de cada linha da tarefa.
-      2. Usa a linha cujas datas contenham a data da audiência da planilha.
-      3. Se apenas uma tarefa existe e a data não está no texto → prossegue
-         com aviso (casos onde o Elaw não exibe a data na linha).
-      4. Se múltiplas tarefas e nenhuma com a data correta → ERRO. Nunca
-         preenche uma tarefa de data errada.
+    As linhas da tabela mostram o prazo de cumprimento (ex: 05/05/2026),
+    não a data da audiência. Por isso a estratégia de matching usa:
+      1. Texto da linha — se a data da audiência aparecer ali (raro).
+      2. Popup da lupa — abre os detalhes da tarefa e verifica a data.
+         (sem fallback perigoso: só clica se lupa for claramente identificada)
+      3. Uma única tarefa disponível → prossegue com aviso.
+      4. Múltiplas tarefas sem match de data → ERRO — nunca preenche às cegas.
     """
     date_part = data_audiencia.strip()[:10]   # DD/MM/YYYY
     time_part = horario.strip()[:5]           # HH:MM
 
-    # Lê todas as linhas da tarefa + extrai datas visíveis no texto
     task_info = page.evaluate("""(() => {
         const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
             r.textContent.toLowerCase().includes('externo') &&
@@ -406,8 +434,7 @@ def _find_verify_and_open_task(page, data_audiencia, horario, log) -> str:
         return rows.map((r, i) => {
             const text = r.textContent || '';
             const dates = (text.match(/\\d{2}\\/\\d{2}\\/\\d{4}/g) || []);
-            const times = (text.match(/\\d{2}:\\d{2}/g) || []);
-            return { index: i, text: text.substring(0, 300), dates, times };
+            return { index: i, text: text.substring(0, 300), dates };
         });
     })()""")
 
@@ -416,41 +443,138 @@ def _find_verify_and_open_task(page, data_audiencia, horario, log) -> str:
     if task_count == 0:
         return "ja_cumprido"
 
+    if task_count == 1:
+        # Única tarefa — sem risco de ambiguidade
+        _click_check_icon(page, 0)
+        return "ok"
+
+    # Múltiplas tarefas: precisa identificar a correta
+    # Estratégia 1: data da audiência visível no texto da linha
     matched_index = None
+    for info in task_info:
+        if date_part and (date_part in info.get("dates", []) or date_part in info.get("text", "")):
+            matched_index = info["index"]
+            log(f"  🔍 Tarefa {info['index']+1}/{task_count}: data {date_part} encontrada na linha.", "info")
+            break
 
-    if date_part:
-        # Tenta match direto: procura a tarefa cuja linha contenha a data correta
-        for info in task_info:
-            row_dates = info.get("dates", [])
-            row_text  = info.get("text", "")
-            if date_part in row_dates or date_part in row_text:
-                matched_index = info["index"]
-                log(f"  🔍 Tarefa {info['index']+1}/{task_count}: data {date_part} confirmada na linha.", "info")
-                break
+    # Estratégia 2: verifica popup da lupa para cada tarefa
+    if matched_index is None and date_part:
+        log(f"  🔍 {task_count} tarefas — verificando data via popup de detalhes...", "info")
+        lupa_could_open = False
+        matched_indices = []
 
-    if matched_index is None:
-        if task_count == 1:
-            # Única tarefa — sem risco de ambiguidade, prossegue com aviso
-            matched_index = task_info[0]["index"]
-            all_dates = task_info[0].get("dates", [])
-            log(
-                f"  ⚠️ Data {date_part} não encontrada no texto da tarefa "
-                f"(datas na linha: {all_dates or 'nenhuma'}). "
-                f"Única tarefa disponível — prosseguindo.",
-                "warn",
-            )
-        else:
-            # Múltiplas tarefas e nenhuma com a data correta → recusa preencher
+        for i in range(task_count):
+            result = _check_lupa_popup(page, i, date_part, time_part)
+            if result is None:
+                pass  # lupa não disponível ou popup não abriu
+            else:
+                lupa_could_open = True
+                if result is True:
+                    matched_indices.append(i)
+                    log(f"  🔍 Tarefa {i+1}/{task_count}: data {date_part} confirmada via popup.", "info")
+                else:
+                    log(f"  🔍 Tarefa {i+1}/{task_count}: data não corresponde — ignorada.", "info")
+
+        if matched_indices:
+            matched_index = matched_indices[0]
+            if len(matched_indices) > 1:
+                log(f"  ⚠️ {len(matched_indices)} tarefas com a data {date_part} — usando a primeira.", "warn")
+        elif lupa_could_open:
+            # Lupa abriu mas nenhuma tarefa tem a data correta
             all_dates = [info.get("dates", []) for info in task_info]
             raise Exception(
                 f"Processo tem {task_count} tarefas 'Externo: Inserir Relatório' "
                 f"mas nenhuma corresponde à data {date_part} {time_part}. "
-                f"Datas encontradas por tarefa: {all_dates}. "
-                f"Cumpra manualmente a tarefa correta e rode novamente."
+                f"Datas nas linhas: {all_dates}. Cumpra manualmente a tarefa correta."
             )
+        else:
+            # Não foi possível verificar via lupa — usa a primeira com aviso
+            log(
+                f"  ⚠️ {task_count} tarefas encontradas e não foi possível verificar datas "
+                f"(botão de detalhes não identificado). Usando a primeira tarefa.",
+                "warn",
+            )
+            matched_index = 0
+
+    if matched_index is None:
+        matched_index = 0
 
     _click_check_icon(page, matched_index)
     return "ok"
+
+
+def _check_lupa_popup(page, row_index: int, date_part: str, time_part: str):
+    """
+    Tenta abrir o popup de detalhes da tarefa via botão de lupa/visualizar.
+    Retorna: True (data bate), False (data não bate), None (não conseguiu verificar).
+    Não usa fallback — se a lupa não for claramente identificada, retorna None.
+    """
+    lupa_result = page.evaluate(f"""(() => {{
+        const rows = Array.from(document.querySelectorAll('tr')).filter(r =>
+            r.textContent.toLowerCase().includes('externo') &&
+            r.textContent.toLowerCase().includes('relat') &&
+            r.textContent.toLowerCase().includes('audi')
+        );
+        const row = rows[{row_index}];
+        if (!row) return 'sem_row';
+
+        const buttons = Array.from(row.querySelectorAll('button, a'));
+        // Identifica o botão de lupa/visualizar por ícone ou atributo — SEM fallback genérico
+        const lupaBtn = buttons.find(b => {{
+            const html  = b.innerHTML.toLowerCase();
+            const title = (b.title || b.getAttribute('aria-label') || '').toLowerCase();
+            return html.includes('search')    || html.includes('lupa')    ||
+                   html.includes('zoom')     || html.includes('fa-eye')  ||
+                   html.includes('pi-search')|| html.includes('pi-eye')  ||
+                   html.includes('fa-search')|| html.includes('glyphicon-search') ||
+                   title.includes('visuali') || title.includes('detalhe') ||
+                   title.includes('ver ')    || title.includes('abrir');
+        }});
+        if (!lupaBtn) return 'sem_lupa';
+        lupaBtn.click();
+        return 'ok';
+    }})()""")
+
+    if lupa_result != "ok":
+        return None
+
+    time.sleep(1.5)
+
+    popup_text = page.evaluate("""(() => {
+        for (const sel of [
+            '.ui-dialog:not([style*="display: none"])',
+            '.ui-overlaypanel:not([style*="display: none"])',
+            '[role="dialog"]',
+            '[class*="popup"]:not([style*="display: none"])',
+        ]) {
+            const el = document.querySelector(sel);
+            if (el && el.offsetParent !== null) return el.textContent;
+        }
+        return null;
+    })()""")
+
+    # Fecha popup
+    page.evaluate("""(() => {
+        for (const sel of [
+            '.ui-dialog-titlebar-close',
+            'button[aria-label="Close"]',
+            '[data-dismiss="modal"]',
+        ]) {
+            const btn = document.querySelector(sel);
+            if (btn && btn.offsetParent !== null) { btn.click(); return; }
+        }
+        const fechar = Array.from(document.querySelectorAll('button, a'))
+            .find(b => b.textContent.trim().toLowerCase() === 'fechar' && b.offsetParent !== null);
+        if (fechar) fechar.click();
+    })()""")
+    time.sleep(0.5)
+
+    if not popup_text:
+        return None  # Popup não abriu — não podemos verificar
+
+    has_date = (not date_part) or (date_part in popup_text)
+    has_time = (not time_part) or (time_part in popup_text)
+    return has_date and has_time
 
 
 def _click_check_icon(page, row_index: int):
@@ -539,7 +663,16 @@ def _fill_form(page, row: dict):
             # Dropdown PrimeFaces
             _set_dropdown(page, keywords, value)
 
-        time.sleep(0.3)
+        # "Teve testemunha?" dispara AJAX que renderiza campos condicionais
+        # (reclamada/reclamante testemunha). Aguarda antes de continuar.
+        if row_key == "teve_testemunha":
+            time.sleep(1.5)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+        else:
+            time.sleep(0.3)
 
 
 def _set_sim_nao(page, keywords: list, value: str):
@@ -565,17 +698,38 @@ def _set_sim_nao(page, keywords: list, value: str):
         const container = containerFor(keywords);
         if (!container) return;
 
-        // Tenta radio buttons
+        // Estratégia 1 (preferida): PrimeFaces radiobutton — clica no .ui-radiobutton-box
+        // O clique direto no <input> não dispara os event listeners do PrimeFaces.
+        for (const rfItem of container.querySelectorAll('.ui-radiobutton')) {{
+            const box   = rfItem.querySelector('.ui-radiobutton-box');
+            const input = rfItem.querySelector('input[type=radio]');
+            let lblText = '';
+            if (input) {{
+                const assocLbl = document.querySelector('label[for="' + input.id + '"]');
+                lblText = (assocLbl ? assocLbl.textContent : input.value || '').trim().toLowerCase();
+            }}
+            if (!lblText) {{
+                const sib = rfItem.nextElementSibling;
+                lblText = sib ? sib.textContent.trim().toLowerCase() : '';
+            }}
+            if (lblText && (lblText.includes(valueLow) || valueLow.includes(lblText))) {{
+                if (box) {{ box.click(); return; }}
+                if (input) {{ input.click(); return; }}
+            }}
+        }}
+
+        // Estratégia 2: radio nativo (+ clique no label para disparar PrimeFaces)
         for (const radio of container.querySelectorAll('input[type=radio]')) {{
             const lbl = document.querySelector('label[for="' + radio.id + '"]');
             const txt = (lbl ? lbl.textContent : radio.value).trim().toLowerCase();
             if (txt.includes(valueLow) || valueLow.includes(txt)) {{
                 radio.click();
+                if (lbl) lbl.click();
                 return;
             }}
         }}
 
-        // Tenta select nativo
+        // Estratégia 3: select nativo
         const sel = container.querySelector('select');
         if (sel) {{
             const opt = Array.from(sel.options).find(o =>
@@ -588,12 +742,13 @@ def _set_sim_nao(page, keywords: list, value: str):
             return;
         }}
 
-        // Tenta PrimeFaces selectOneRadio / selectBooleanCheckbox por texto
-        const items = container.querySelectorAll('.ui-radiobutton, .ui-chkbox');
-        for (const item of items) {{
+        // Estratégia 4: PrimeFaces checkbox por sibling label
+        for (const item of container.querySelectorAll('.ui-chkbox')) {{
             const lbl = item.nextElementSibling || item.previousElementSibling;
             if (lbl && lbl.textContent.trim().toLowerCase().includes(valueLow)) {{
-                item.querySelector('input, .ui-radiobutton-box, .ui-chkbox-box')?.click();
+                const box = item.querySelector('.ui-chkbox-box');
+                if (box) {{ box.click(); return; }}
+                item.querySelector('input')?.click();
                 return;
             }}
         }}
